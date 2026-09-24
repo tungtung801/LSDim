@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.1.4
+ * 26LockDim 0.1.5
  *
  * Lock Screen notification background dimming, kept separate from 26Unlock.
  * The tweak observes the live CoverSheet hierarchy and writes only a black
@@ -43,7 +43,7 @@ static BOOL     g_baselineReady;
 static CGRect   g_baseRect;
 static CGFloat  g_baseOffsetY;
 static CGSize   g_baseRootSize;
-static CGFloat  g_baseClockTopInRoot;
+static CGFloat  g_baseClockTopOnScreen;
 static BOOL     g_clockBaselineReady;
 static CGFloat  g_currentClockTranslateY;
 static CGFloat  g_alpha;
@@ -156,73 +156,88 @@ static BOOL ld_isDescendant(UIView *view, UIView *root) {
     return [view isDescendantOfView:root];
 }
 
-static UIView *ld_findViewMatching(UIView *view, NSString *substr, int depth) {
-    if (!view || depth > 16) return nil;
+/* Locate the actual ProminentTimeView (clock digits on iOS 16) */
+static UIView *ld_findClockTimeView(UIView *view, int depth) {
+    if (!view || depth > 20) return nil;
     NSString *name = ld_className(view);
-    if ([name containsString:substr]) return view;
+    if ([name isEqualToString:@"CSProminentTimeView"] ||
+        [name containsString:@"ProminentTime"]) {
+        return view;
+    }
     for (UIView *sub in view.subviews) {
-        UIView *found = ld_findViewMatching(sub, substr, depth + 1);
+        UIView *found = ld_findClockTimeView(sub, depth + 1);
         if (found) return found;
     }
     return nil;
 }
 
-/* Locate both the clock container (e.g. CSProminentDisplayView / dateView)
- * and the actual time view (e.g. CSProminentTimeView / SBFLockScreenDateView). */
-static void ld_locateClockViews(UIView *root, UIView **outContainer, UIView **outTime) {
-    if (!root) return;
-
-    UIView *container = nil;
-    UIView *timeView = nil;
-
-    @try {
-        if (g_coverController && [g_coverController respondsToSelector:@selector(dateViewController)]) {
-            UIViewController *dvc = [g_coverController valueForKey:@"dateViewController"];
-            if (dvc && dvc.view) {
-                container = dvc.view;
-            }
-        }
-    } @catch (NSException *e) {}
-
-    if (!container) {
-        @try {
-            if ([root respondsToSelector:@selector(dateView)]) {
-                container = [root valueForKey:@"dateView"];
-            }
-        } @catch (NSException *e) {}
+/* Fallback for iOS 15 legacy Lock Screen date view */
+static UIView *ld_findLegacyClockView(UIView *view, int depth) {
+    if (!view || depth > 20) return nil;
+    NSString *name = ld_className(view);
+    if ([name containsString:@"LockScreenDateView"]) {
+        return view;
     }
-
-    if (!container) {
-        container = ld_findViewMatching(root, @"ProminentDisplay", 0);
+    for (UIView *sub in view.subviews) {
+        UIView *found = ld_findLegacyClockView(sub, depth + 1);
+        if (found) return found;
     }
-    if (!container) {
-        container = ld_findViewMatching(root, @"LockScreenDateView", 0);
-    }
-
-    UIView *searchScope = container ?: root;
-    timeView = ld_findViewMatching(searchScope, @"ProminentTime", 0);
-    if (!timeView && searchScope != root) {
-        timeView = ld_findViewMatching(root, @"ProminentTime", 0);
-    }
-    if (!timeView) {
-        timeView = container;
-    }
-
-    if (!container && timeView) {
-        if (timeView.superview && timeView.superview != root) {
-            container = timeView.superview;
-        } else {
-            container = timeView;
-        }
-    }
-
-    if (outContainer) *outContainer = container;
-    if (outTime) *outTime = timeView;
+    return nil;
 }
 
-/* Find the scroll surface that represents the Lock Screen notification list.
- * The class names changed between iOS 15 and 16, so use names only as a
- * positive score and retain a geometry/content fallback. */
+/* Find the container view that wraps the clock (e.g. CSProminentDisplayView) */
+static UIView *ld_findClockContainer(UIView *timeView, UIView *root) {
+    if (!timeView) return nil;
+    UIView *cur = timeView.superview;
+    while (cur && cur != root) {
+        NSString *name = ld_className(cur);
+        if ([name containsString:@"ProminentDisplay"] ||
+            [name containsString:@"LockScreenDateView"]) {
+            return cur;
+        }
+        cur = cur.superview;
+    }
+    if (timeView.superview && timeView.superview != root) {
+        return timeView.superview;
+    }
+    return timeView;
+}
+
+/* Find both timeView and its containerView reliably across iOS 15 & 16 */
+static void ld_locateClockViews(UIView *root, UIView **outContainer, UIView **outTime) {
+    UIView *timeView = nil;
+    UIView *container = nil;
+
+    // 1. Search root view tree
+    if (root) {
+        timeView = ld_findClockTimeView(root, 0);
+    }
+    // 2. Search root.window if not found directly under root
+    if (!timeView && root && root.window) {
+        timeView = ld_findClockTimeView(root.window, 0);
+    }
+    // 3. Search all application windows
+    if (!timeView) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            timeView = ld_findClockTimeView(w, 0);
+            if (timeView) break;
+        }
+    }
+    // 4. Legacy iOS 15 fallback
+    if (!timeView) {
+        if (root) timeView = ld_findLegacyClockView(root, 0);
+        if (!timeView && root && root.window) timeView = ld_findLegacyClockView(root.window, 0);
+    }
+
+    if (timeView) {
+        container = ld_findClockContainer(timeView, root);
+    }
+
+    if (outTime) *outTime = timeView;
+    if (outContainer) *outContainer = container;
+}
+
+/* Find the scroll surface that represents the Lock Screen notification list. */
 static void ld_findNotificationScroll(UIView *view, UIView *root,
                                       UIScrollView **best, CGFloat *bestScore,
                                       int depth) {
@@ -305,23 +320,24 @@ static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
     g_clockContainerView = container;
     g_clockTimeView = timeView;
 
-    if (timeView && root.window) {
+    if (timeView && timeView.window) {
         @try {
-            CGRect r = [timeView convertRect:timeView.bounds toView:root];
-            if (r.size.height > 10.0 && r.origin.y > 0.0) {
-                g_baseClockTopInRoot = r.origin.y;
+            CGRect r = [timeView convertRect:timeView.bounds toView:nil];
+            if (r.size.height > 10.0 && r.origin.y > 10.0) {
+                g_baseClockTopOnScreen = r.origin.y;
                 g_clockBaselineReady = YES;
                 g_currentClockTranslateY = 0.0f;
-                if (container && container != timeView) {
+                if (container) {
                     container.transform = CGAffineTransformIdentity;
                 }
             }
         } @catch (NSException *e) {}
     }
 
-    ld_log(@"baseline scroll=%@ rect=%@ offsetY=%.2f root=%@ clockTop=%.1f",
+    ld_log(@"baseline scroll=%@ rect=%@ offsetY=%.2f root=%@ clockTop=%.1f container=%@ time=%@",
            ld_className(scroll), NSStringFromCGRect(g_baseRect),
-           g_baseOffsetY, NSStringFromClass([root class]), g_baseClockTopInRoot);
+           g_baseOffsetY, NSStringFromClass([root class]), g_baseClockTopOnScreen,
+           ld_className(container), ld_className(timeView));
 }
 
 /* Put the overlay in the full-screen ancestor immediately below the direct
@@ -433,7 +449,7 @@ static void ld_setActive(BOOL active) {
         g_clockTimeView = nil;
         g_clockBaselineReady = NO;
         g_currentClockTranslateY = 0.0f;
-        g_baseClockTopInRoot = 0.0f;
+        g_baseClockTopOnScreen = 0.0f;
 
         if (g_displayLink) {
             [g_displayLink invalidate];
@@ -544,46 +560,57 @@ static void ld_tick_impl(CADisplayLink *link) {
         g_overlay.alpha = g_alpha;
     }
 
-    // Dynamic Sticky Compensation on the clock container
+    // Hardware-Accurate Sticky Anchoring for Lock Screen Clock
     if (g_stickyClock) {
         UIView *container = g_clockContainerView;
         UIView *timeView = g_clockTimeView;
-        if (!container || !timeView || container.window != root.window) {
+        if (!container || !timeView || !timeView.window) {
             ld_locateClockViews(root, &container, &timeView);
             g_clockContainerView = container;
             g_clockTimeView = timeView;
         }
 
-        if (timeView && root.window) {
-            if (!g_clockBaselineReady || (g_progress < 0.005f && fabs(g_currentClockTranslateY) < 0.1f)) {
+        if (timeView && timeView.window) {
+            // Idle state: capture or calibrate resting baseline
+            if (!g_clockBaselineReady) {
                 @try {
-                    CGRect r = [timeView convertRect:timeView.bounds toView:root];
-                    if (r.size.height > 10.0 && r.origin.y > 0.0) {
-                        g_baseClockTopInRoot = r.origin.y;
+                    CGRect r = [timeView convertRect:timeView.bounds toView:nil];
+                    if (r.size.height > 10.0 && r.origin.y > 10.0) {
+                        g_baseClockTopOnScreen = r.origin.y;
                         g_clockBaselineReady = YES;
+                        g_currentClockTranslateY = 0.0f;
+                        if (container) container.transform = CGAffineTransformIdentity;
+                    }
+                } @catch (NSException *e) {}
+            } else if (g_progress < 0.005f && fabs(g_currentClockTranslateY) < 0.5f) {
+                @try {
+                    CGRect r = [timeView convertRect:timeView.bounds toView:nil];
+                    if (r.size.height > 10.0 && r.origin.y > 10.0) {
+                        g_baseClockTopOnScreen = r.origin.y;
                     }
                 } @catch (NSException *e) {}
             }
 
-            // Compensate only on the container view (never touch timeView directly to avoid fighting external scaling tweaks)
-            if (g_clockBaselineReady && container && container != timeView) {
+            // Active pull/scroll: compensate translation on container
+            if (g_clockBaselineReady && container) {
                 @try {
-                    CGRect curRect = [timeView convertRect:timeView.bounds toView:root];
-                    CGFloat uncompensatedTop = curRect.origin.y - g_currentClockTranslateY;
-                    CGFloat neededCompensation = g_baseClockTopInRoot - uncompensatedTop;
+                    CGRect curRect = [timeView convertRect:timeView.bounds toView:nil];
+                    CGFloat currentTop = curRect.origin.y;
+                    CGFloat uncompensatedTop = currentTop - g_currentClockTranslateY;
+                    CGFloat targetTranslateY = g_baseClockTopOnScreen - uncompensatedTop;
 
-                    if (g_progress < 0.001f && fabs(neededCompensation) < 1.0) {
-                        neededCompensation = 0.0f;
+                    if (g_progress < 0.001f && fabs(targetTranslateY) < 1.0f) {
+                        targetTranslateY = 0.0f;
                     }
 
-                    if (fabs(neededCompensation - g_currentClockTranslateY) > 0.2f) {
-                        g_currentClockTranslateY = neededCompensation;
+                    if (fabs(targetTranslateY - g_currentClockTranslateY) > 0.2f) {
+                        g_currentClockTranslateY = targetTranslateY;
                         container.transform = CGAffineTransformMakeTranslation(0.0, g_currentClockTranslateY);
                     }
                 } @catch (NSException *e) {}
             }
         }
-    } else if (g_clockContainerView && fabs(g_currentClockTranslateY) > 0.0) {
+    } else if (g_clockContainerView && fabs(g_currentClockTranslateY) > 0.0f) {
         g_clockContainerView.transform = CGAffineTransformIdentity;
         g_currentClockTranslateY = 0.0f;
     }
@@ -591,7 +618,7 @@ static void ld_tick_impl(CADisplayLink *link) {
     if (g_debug && now - g_lastLog > 0.20) {
         ld_log(@"tick progress=%.3f alpha=%.3f scroll=%@ clockTop=%.1f transY=%.1f",
                g_progress, g_alpha, ld_className(scroll),
-               g_baseClockTopInRoot, g_currentClockTranslateY);
+               g_baseClockTopOnScreen, g_currentClockTranslateY);
         g_lastLog = now;
     }
 }
@@ -638,55 +665,11 @@ static IMP ld_swizzle(Class cls, SEL selector, IMP replacement) {
 }
 
 typedef void (*LDViewAppearFn)(id, SEL, BOOL);
-typedef void (*LDLayoutDateViewFn)(id, SEL);
-typedef void (*LDCSSetDateViewOffsetFn)(id, SEL, CGPoint);
-typedef CGRect (*LDCSDateViewFrameFn)(id, SEL, long long, double, double *);
-typedef CGRect (*LDCSDateViewExtentFn)(id, SEL, double);
 
 static IMP g_origCSAppear = NULL;
 static IMP g_origCSDisappear = NULL;
 static IMP g_origSBAppear = NULL;
 static IMP g_origSBDisappear = NULL;
-static IMP g_origCSLayoutDateView = NULL;
-static IMP g_origCSSetDateViewOffset = NULL;
-static IMP g_origCSDateViewFrame = NULL;
-static IMP g_origCSDateViewExtent = NULL;
-
-static void ld_csSetDateViewOffset(id self, SEL selector, CGPoint offset) {
-    if (g_enabled && g_stickyClock) {
-        offset.y = 0.0;
-    }
-    if (g_origCSSetDateViewOffset) {
-        ((LDCSSetDateViewOffsetFn)g_origCSSetDateViewOffset)(self, selector, offset);
-    }
-}
-
-static CGRect ld_csDateViewFrame(id self, SEL selector, long long align, double scrollOffset, double *outPercent) {
-    if (g_enabled && g_stickyClock) {
-        scrollOffset = 0.0;
-    }
-    if (g_origCSDateViewFrame) {
-        return ((LDCSDateViewFrameFn)g_origCSDateViewFrame)(self, selector, align, scrollOffset, outPercent);
-    }
-    return CGRectZero;
-}
-
-static CGRect ld_csDateViewExtent(id self, SEL selector, double scrollOffset) {
-    if (g_enabled && g_stickyClock) {
-        scrollOffset = 0.0;
-    }
-    if (g_origCSDateViewExtent) {
-        return ((LDCSDateViewExtentFn)g_origCSDateViewExtent)(self, selector, scrollOffset);
-    }
-    return CGRectZero;
-}
-
-static void ld_csLayoutDateView(id self, SEL selector) {
-    if (g_origCSLayoutDateView) {
-        ((LDLayoutDateViewFn)g_origCSLayoutDateView)(self, selector);
-    }
-    // Clean: do NOT mutate frame here to prevent layout recursion and ghosting
-}
 
 static void ld_csViewWillAppear(id self, SEL selector, BOOL animated) {
     if (g_origCSAppear) ((LDViewAppearFn)g_origCSAppear)(self, selector, animated);
@@ -733,7 +716,6 @@ static void ld_init(void) {
 
         Class cs = NSClassFromString(@"CSCoverSheetViewController");
         Class sb = NSClassFromString(@"SBCoverSheetViewController");
-        Class csView = NSClassFromString(@"CSCoverSheetView");
         if (cs) {
             g_origCSAppear = ld_swizzle(cs, @selector(viewWillAppear:),
                                         (IMP)ld_csViewWillAppear);
@@ -746,21 +728,10 @@ static void ld_init(void) {
             g_origSBDisappear = ld_swizzle(sb, @selector(viewDidDisappear:),
                                            (IMP)ld_sbViewDidDisappear);
         }
-        if (csView) {
-            g_origCSLayoutDateView = ld_swizzle(csView, @selector(_layoutDateView),
-                                                (IMP)ld_csLayoutDateView);
-            g_origCSSetDateViewOffset = ld_swizzle(csView, @selector(setDateViewOffset:),
-                                                   (IMP)ld_csSetDateViewOffset);
-            g_origCSDateViewFrame = ld_swizzle(csView, @selector(_dateViewFrameForPageAlignment:pageRelativeScrollOffset:outAlignmentPercent:),
-                                               (IMP)ld_csDateViewFrame);
-            g_origCSDateViewExtent = ld_swizzle(csView, @selector(dateViewPresentationExtentForPageRelativeScrollOffset:),
-                                                (IMP)ld_csDateViewExtent);
-        }
 
-        ld_log(@"loaded enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ CSView=%@",
+        ld_log(@"loaded enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
-               sb ? NSStringFromClass(sb) : @"missing",
-               csView ? NSStringFromClass(csView) : @"missing");
+               sb ? NSStringFromClass(sb) : @"missing");
     }
 }
