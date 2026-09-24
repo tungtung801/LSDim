@@ -1,10 +1,10 @@
 /*
- * 26LockDim 0.1.2
+ * 26LockDim 0.1.3
  *
  * Lock Screen notification background dimming, kept separate from 26Unlock.
  * The tweak observes the live CoverSheet hierarchy and writes only a black
- * background layer below the notification branch.  It does not change system
- * brightness, notification alpha, the clock, or the unlock state machine.
+ * background layer below the notification branch and clock branch. It does not
+ * change system brightness, notification alpha, the clock, or the unlock state machine.
  */
 
 #import <UIKit/UIKit.h>
@@ -27,6 +27,7 @@ static float g_maxAlpha = 0.48f;
 static __weak UIViewController *g_coverController;
 static __weak UIView *g_coverRoot;
 static __weak UIScrollView *g_notificationScroll;
+static __weak UIView *g_clockBranch;
 static __weak UIView *g_overlayHost;
 static UIView *g_overlay;
 static CADisplayLink *g_displayLink;
@@ -221,9 +222,68 @@ static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
            g_baseOffsetY, NSStringFromClass([root class]));
 }
 
-/* Put the overlay in the full-screen ancestor immediately below the direct
- * branch containing notifications.  This leaves the notification branch
- * above the black layer while dimming wallpaper/background siblings below it. */
+/* Find the clock / prominent time view on the Lock Screen so we can keep it
+ * above the dimming overlay.
+ * iOS 16+: CSProminentTimeView (digits) or CSProminentDisplayView (container)
+ * iOS 15/legacy: SBFLockScreenDateView
+ */
+static void ld_findClockView(UIView *view, UIView **best, int depth) {
+    if (!view || depth > 14 || *best) return;
+
+    NSString *name = ld_className(view);
+    if ([name isEqualToString:@"CSProminentTimeView"] ||
+        [name isEqualToString:@"CSProminentDisplayView"] ||
+        [name isEqualToString:@"SBFLockScreenDateView"]) {
+        *best = view;
+        return;
+    }
+
+    if ([name containsString:@"ProminentTime"] ||
+        [name containsString:@"LockScreenDateView"]) {
+        *best = view;
+        return;
+    }
+
+    for (UIView *subview in view.subviews) {
+        ld_findClockView(subview, best, depth + 1);
+        if (*best) return;
+    }
+}
+
+static UIView *ld_clockBranchForRoot(UIView *root) {
+    if (!root) return nil;
+
+    UIView *clockView = nil;
+    @try {
+        if (g_coverController && [g_coverController respondsToSelector:@selector(dateViewController)]) {
+            UIViewController *dvc = [g_coverController valueForKey:@"dateViewController"];
+            if (dvc && dvc.view) clockView = dvc.view;
+        }
+        if (!clockView && [root respondsToSelector:@selector(dateView)]) {
+            UIView *dv = [root valueForKey:@"dateView"];
+            if (dv) clockView = dv;
+        }
+    } @catch (NSException *e) {
+    }
+
+    if (!clockView) {
+        ld_findClockView(root, &clockView, 0);
+    }
+
+    if (!clockView) return nil;
+
+    UIView *branch = clockView;
+    while (branch.superview && branch.superview != root)
+        branch = branch.superview;
+
+    if (branch.superview == root) return branch;
+    return nil;
+}
+
+/* Put the overlay in the full-screen ancestor immediately below both the direct
+ * branch containing notifications and the branch containing the clock / time view.
+ * This leaves the notification branch and clock branch above the black layer
+ * while dimming wallpaper/background siblings below it. */
 static void ld_attachOverlay(UIView *root, UIScrollView *scroll) {
     if (!root || !scroll) return;
 
@@ -233,6 +293,17 @@ static void ld_attachOverlay(UIView *root, UIScrollView *scroll) {
 
     if (!branch.superview && branch != root) return;
 
+    UIView *host = root;
+
+    UIView *clockBranch = g_clockBranch;
+    if (!clockBranch || clockBranch.superview != host) {
+        clockBranch = ld_clockBranchForRoot(host);
+        g_clockBranch = clockBranch;
+    }
+    if (clockBranch == branch) {
+        clockBranch = nil;
+    }
+
     if (!g_overlay) {
         g_overlay = [[UIView alloc] initWithFrame:root.bounds];
         g_overlay.backgroundColor = [UIColor blackColor];
@@ -241,30 +312,49 @@ static void ld_attachOverlay(UIView *root, UIScrollView *scroll) {
         g_overlay.layer.zPosition = 0.0;
     }
 
-    UIView *host = root;
-    NSUInteger index = [host.subviews indexOfObject:branch];
-    if (index == NSNotFound) index = 0;
-
-    NSUInteger oldIndex = g_overlay ? [host.subviews indexOfObject:g_overlay] : NSNotFound;
+    NSUInteger oldIndex = g_overlay.superview == host ? [host.subviews indexOfObject:g_overlay] : NSNotFound;
+    NSUInteger clockIndex = (clockBranch && clockBranch.superview == host)
+        ? [host.subviews indexOfObject:clockBranch]
+        : NSNotFound;
     NSUInteger branchIndex = [host.subviews indexOfObject:branch];
-    BOOL alreadyBelow = (oldIndex != NSNotFound &&
-                         branchIndex != NSNotFound &&
-                         oldIndex + 1 == branchIndex);
-    if (g_overlay.superview != host || !alreadyBelow) {
+
+    NSUInteger targetUpperIndex = branchIndex;
+    if (clockIndex != NSNotFound && clockIndex < targetUpperIndex) {
+        targetUpperIndex = clockIndex;
+    }
+
+    BOOL alreadyPositioned = (oldIndex != NSNotFound &&
+                              targetUpperIndex != NSNotFound &&
+                              oldIndex + 1 == targetUpperIndex);
+
+    if (g_overlay.superview != host || !alreadyPositioned) {
         [g_overlay removeFromSuperview];
-        branchIndex = [host.subviews indexOfObject:branch];
-        if (branchIndex == NSNotFound) branchIndex = 0;
-        [host insertSubview:g_overlay atIndex:branchIndex];
+
+        NSUInteger freshClockIndex = (clockBranch && clockBranch.superview == host)
+            ? [host.subviews indexOfObject:clockBranch]
+            : NSNotFound;
+        NSUInteger freshBranchIndex = [host.subviews indexOfObject:branch];
+
+        NSUInteger insertIndex = freshBranchIndex;
+        if (freshClockIndex != NSNotFound && freshClockIndex < insertIndex) {
+            insertIndex = freshClockIndex;
+        }
+        if (insertIndex == NSNotFound) insertIndex = 0;
+
+        [host insertSubview:g_overlay atIndex:insertIndex];
+
+        if (g_lastLog == 0.0 || g_debug) {
+            ld_log(@"overlay host=%@ insertIndex=%lu (clock=%@ idx=%lu, notif=%@ idx=%lu)",
+                   ld_className(host), (unsigned long)insertIndex,
+                   ld_className(clockBranch), (unsigned long)freshClockIndex,
+                   ld_className(branch), (unsigned long)freshBranchIndex);
+        }
     }
 
     g_overlay.frame = host.bounds;
     g_overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth |
                                  UIViewAutoresizingFlexibleHeight;
     g_overlayHost = host;
-
-    if (g_lastLog == 0.0)
-        ld_log(@"overlay host=%@ below branch=%@ index=%lu",
-               ld_className(host), ld_className(branch), (unsigned long)index);
 }
 
 static void ld_scanPanProgress(UIView *view, UIView *root, CGFloat *progress,
@@ -331,6 +421,7 @@ static void ld_setActive(BOOL active) {
     g_active = active;
     g_baselineReady = NO;
     g_notificationScroll = nil;
+    g_clockBranch = nil;
     g_progress = 0.0f;
     g_alpha = 0.0f;
     g_lastFrame = 0.0;
@@ -343,6 +434,7 @@ static void ld_setActive(BOOL active) {
         [g_overlay removeFromSuperview];
         g_overlay = nil;
         g_overlayHost = nil;
+        g_clockBranch = nil;
         return;
     }
 
