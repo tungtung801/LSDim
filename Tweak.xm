@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.1.1
+ * 26LockDim 0.1.2
  *
  * Lock Screen notification background dimming, kept separate from 26Unlock.
  * The tweak observes the live CoverSheet hierarchy and writes only a black
@@ -22,7 +22,7 @@
 
 static BOOL  g_enabled  = YES;
 static BOOL  g_debug    = YES;
-static float g_maxAlpha = 0.32f;
+static float g_maxAlpha = 0.48f;
 
 static __weak UIViewController *g_coverController;
 static __weak UIView *g_coverRoot;
