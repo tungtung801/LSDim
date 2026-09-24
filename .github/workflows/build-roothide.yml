@@ -1,0 +1,105 @@
+name: Build 26LockDim (RootHide)
+
+# RootHide uses a randomised jbroot. Build with the roothide Theos scheme so
+# the installed dylib contains no /var/jb path and RootHide does not need a
+# .roothidepatch companion for this arm64e build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      archs:
+        description: 'ARCHS: arm64e for the A12 test device; arm64 arm64e for a fat package; arm64 for A9'
+        required: false
+        default: 'arm64e'
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.4"
+
+      - name: Install dependencies
+        run: brew install ldid make
+
+      - name: Install RootHide Theos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)" < /dev/null
+          installer_status=$?
+          set -e
+          echo "installer exit code: $installer_status"
+
+          THEOS_DIR="$HOME/theos"
+          [ -d "$THEOS_DIR" ] || THEOS_DIR="$HOME/.theos"
+          [ -d "$THEOS_DIR" ] || { echo "::error::could not locate roothide Theos"; exit 1; }
+          echo "THEOS=$THEOS_DIR" >> "$GITHUB_ENV"
+
+          # install-sdk may be rate-limited. Fall back to the latest SDK release.
+          if [ -z "$(ls -A "$THEOS_DIR/sdks" 2>/dev/null)" ]; then
+            mkdir -p "$THEOS_DIR/sdks"
+            "$THEOS_DIR/bin/install-sdk" latest < /dev/null || {
+              url=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+                https://api.github.com/repos/theos/sdks/releases/latest \
+                | grep -o 'https://[^" ]*iPhoneOS[0-9.]*\.sdk\.tar\.xz' \
+                | sort -V | tail -n1)
+              [ -n "$url" ] || { echo "::error::could not resolve iPhoneOS SDK"; exit 1; }
+              curl -fsSL "$url" | tar -xJ -C "$THEOS_DIR/sdks"
+            }
+          fi
+          ls -A "$THEOS_DIR/sdks"
+
+      - name: Remove stale packages
+        run: rm -f packages/*.deb
+
+      - name: Build RootHide package
+        env:
+          ARCHS: ${{ github.event.inputs.archs || 'arm64e' }}
+        run: |
+          echo "ARCHS=$ARCHS"
+          make clean
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS="$ARCHS"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: 26LockDim-roothide
+          path: packages/*.deb
+          if-no-files-found: error
+
+      - name: Verify RootHide payload
+        run: |
+          set -e
+          DEB=$(ls packages/*.deb | head -1)
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          ar -x "$GITHUB_WORKSPACE/$DEB"
+          echo "=== control ==="
+          tar -xzf control.tar.gz -O
+          echo "=== payload ==="
+          for archive in data.tar.*; do tar -tf "$archive"; tar -xf "$archive"; done
+          DYLIB=$(find . -name '26LockDim.dylib' -print -quit)
+          [ -n "$DYLIB" ] || { echo "::error::dylib missing"; exit 1; }
+          echo "=== slices ==="
+          otool -hv "$DYLIB"
+          echo "=== linked libraries ==="
+          otool -L "$DYLIB"
+          echo "=== code signature ==="
+          otool -l "$DYLIB" | grep -A3 LC_CODE_SIGNATURE
+          codesign -dvv "$DYLIB" 2>&1 | head -12
+          echo "=== /var/jb strings (must be 0) ==="
+          if strings "$DYLIB" | grep -F '/var/jb'; then
+            echo '::error::RootHide payload contains /var/jb'
+            exit 1
+          fi
