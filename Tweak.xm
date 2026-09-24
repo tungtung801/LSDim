@@ -20,9 +20,10 @@
 #define LD_LOGFILE  "/var/mobile/26LockDim.log"
 #define LD_SAFEFILE @"/var/mobile/Media/26LockDim.safe"
 
-static BOOL  g_enabled  = YES;
-static BOOL  g_debug    = YES;
-static float g_maxAlpha = 0.48f;
+static BOOL  g_enabled     = YES;
+static BOOL  g_debug       = YES;
+static BOOL  g_stickyClock = YES;
+static float g_maxAlpha    = 0.48f;
 
 static __weak UIViewController *g_coverController;
 static __weak UIView *g_coverRoot;
@@ -33,14 +34,17 @@ static UIView *g_overlay;
 static CADisplayLink *g_displayLink;
 static NSObject *g_displayTarget;
 
-static BOOL  g_active;
-static BOOL  g_safeMode;
-static BOOL  g_markerArmed;
+static BOOL    g_active;
+static BOOL    g_safeMode;
+static BOOL    g_markerArmed;
 static uint64_t g_safetyGeneration;
-static BOOL  g_baselineReady;
-static CGRect g_baseRect;
+static BOOL    g_baselineReady;
+static CGRect  g_baseRect;
 static CGFloat g_baseOffsetY;
-static CGSize g_baseRootSize;
+static CGSize  g_baseRootSize;
+static CGRect  g_baseClockBranchFrame;
+static CGFloat g_baseClockTopInRoot;
+static BOOL    g_clockBaselineReady;
 static CGFloat g_alpha;
 static CGFloat g_progress;
 static CFTimeInterval g_lastFrame;
@@ -90,6 +94,9 @@ static void ld_readSettings(void) {
 
     value = settings[@"debug"];
     if ([value isKindOfClass:[NSNumber class]]) g_debug = [value boolValue];
+
+    value = settings[@"stickyClock"];
+    if ([value isKindOfClass:[NSNumber class]]) g_stickyClock = [value boolValue];
 
     value = settings[@"maxAlpha"];
     if ([value isKindOfClass:[NSNumber class]])
@@ -206,27 +213,6 @@ static BOOL ld_scrollHasNotifications(UIScrollView *scroll) {
     return NO;
 }
 
-static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
-    if (!scroll || !root) return;
-    @try {
-        g_baseRect = [scroll convertRect:scroll.bounds toView:root];
-    } @catch (NSException *exception) {
-        g_baseRect = scroll.frame;
-    }
-    g_baseOffsetY = scroll.contentOffset.y;
-    g_baseRootSize = root.bounds.size;
-    g_baselineReady = YES;
-
-    ld_log(@"baseline scroll=%@ rect=%@ offsetY=%.2f root=%@",
-           ld_className(scroll), NSStringFromCGRect(g_baseRect),
-           g_baseOffsetY, NSStringFromClass([root class]));
-}
-
-/* Find the clock / prominent time view on the Lock Screen so we can keep it
- * above the dimming overlay.
- * iOS 16+: CSProminentTimeView (digits) or CSProminentDisplayView (container)
- * iOS 15/legacy: SBFLockScreenDateView
- */
 static void ld_findClockView(UIView *view, UIView **best, int depth) {
     if (!view || depth > 14 || *best) return;
 
@@ -250,6 +236,12 @@ static void ld_findClockView(UIView *view, UIView **best, int depth) {
     }
 }
 
+static UIView *ld_findClockViewInTree(UIView *view) {
+    UIView *best = nil;
+    ld_findClockView(view, &best, 0);
+    return best;
+}
+
 static UIView *ld_clockBranchForRoot(UIView *root) {
     if (!root) return nil;
 
@@ -267,7 +259,7 @@ static UIView *ld_clockBranchForRoot(UIView *root) {
     }
 
     if (!clockView) {
-        ld_findClockView(root, &clockView, 0);
+        clockView = ld_findClockViewInTree(root);
     }
 
     if (!clockView) return nil;
@@ -278,6 +270,47 @@ static UIView *ld_clockBranchForRoot(UIView *root) {
 
     if (branch.superview == root) return branch;
     return nil;
+}
+
+static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
+    if (!scroll || !root) return;
+    @try {
+        g_baseRect = [scroll convertRect:scroll.bounds toView:root];
+    } @catch (NSException *exception) {
+        g_baseRect = scroll.frame;
+    }
+    g_baseOffsetY = scroll.contentOffset.y;
+    g_baseRootSize = root.bounds.size;
+    g_baselineReady = YES;
+
+    // Capture clock baseline
+    UIView *clockBranch = g_clockBranch;
+    if (!clockBranch || clockBranch.superview != root) {
+        clockBranch = ld_clockBranchForRoot(root);
+        g_clockBranch = clockBranch;
+    }
+    if (clockBranch && clockBranch.superview == root) {
+        g_baseClockBranchFrame = clockBranch.frame;
+        UIView *clockView = ld_findClockViewInTree(clockBranch);
+        if (clockView) {
+            @try {
+                CGRect r = [clockView convertRect:clockView.bounds toView:root];
+                g_baseClockTopInRoot = r.origin.y;
+                g_clockBaselineReady = YES;
+            } @catch (NSException *e) {
+                g_baseClockTopInRoot = clockBranch.frame.origin.y;
+                g_clockBaselineReady = YES;
+            }
+        } else {
+            g_baseClockTopInRoot = clockBranch.frame.origin.y;
+            g_clockBaselineReady = YES;
+        }
+    }
+
+    ld_log(@"baseline scroll=%@ rect=%@ offsetY=%.2f root=%@ clockBranch=%@ top=%.1f",
+           ld_className(scroll), NSStringFromCGRect(g_baseRect),
+           g_baseOffsetY, NSStringFromClass([root class]),
+           NSStringFromCGRect(g_baseClockBranchFrame), g_baseClockTopInRoot);
 }
 
 /* Put the overlay in the full-screen ancestor immediately below both the direct
@@ -420,8 +453,11 @@ static CGFloat ld_progressForScroll(UIScrollView *scroll, UIView *root) {
 static void ld_setActive(BOOL active) {
     g_active = active;
     g_baselineReady = NO;
+    g_clockBaselineReady = NO;
     g_notificationScroll = nil;
     g_clockBranch = nil;
+    g_baseClockBranchFrame = CGRectZero;
+    g_baseClockTopInRoot = 0.0f;
     g_progress = 0.0f;
     g_alpha = 0.0f;
     g_lastFrame = 0.0;
@@ -530,6 +566,36 @@ static void ld_tick_impl(CADisplayLink *link) {
         g_overlay.alpha = g_alpha;
     }
 
+    if (g_stickyClock && g_clockBaselineReady) {
+        UIView *clockBranch = g_clockBranch;
+        if (clockBranch && clockBranch.superview == root) {
+            if (!CGRectEqualToRect(g_baseClockBranchFrame, CGRectZero)) {
+                CGRect bf = clockBranch.frame;
+                if (fabs(bf.origin.y - g_baseClockBranchFrame.origin.y) > 0.5) {
+                    bf.origin.y = g_baseClockBranchFrame.origin.y;
+                    clockBranch.frame = bf;
+                }
+                if (fabs(bf.origin.x - g_baseClockBranchFrame.origin.x) > 0.5) {
+                    bf.origin.x = g_baseClockBranchFrame.origin.x;
+                    clockBranch.frame = bf;
+                }
+            }
+
+            UIView *clockView = ld_findClockViewInTree(clockBranch);
+            if (clockView) {
+                @try {
+                    CGRect curRect = [clockView convertRect:clockView.bounds toView:root];
+                    CGFloat diffY = g_baseClockTopInRoot - curRect.origin.y;
+                    if (fabs(diffY) > 0.5) {
+                        CGAffineTransform t = clockView.transform;
+                        clockView.transform = CGAffineTransformTranslate(t, 0.0, diffY);
+                    }
+                } @catch (NSException *e) {
+                }
+            }
+        }
+    }
+
     if (g_debug && now - g_lastLog > 0.20) {
         g_lastLog = now;
         ld_log(@"scroll=%@ progress=%.3f alpha=%.3f target=%.3f offsetY=%.2f frameY=%.1f",
@@ -584,11 +650,26 @@ static IMP ld_swizzle(Class cls, SEL selector, IMP replacement) {
 }
 
 typedef void (*LDViewAppearFn)(id, SEL, BOOL);
+typedef void (*LDLayoutDateViewFn)(id, SEL);
 
 static IMP g_origCSAppear;
 static IMP g_origCSDisappear;
 static IMP g_origSBAppear;
 static IMP g_origSBDisappear;
+static IMP g_origCSLayoutDateView;
+
+static void ld_csLayoutDateView(id self, SEL selector) {
+    if (g_origCSLayoutDateView) ((LDLayoutDateViewFn)g_origCSLayoutDateView)(self, selector);
+    if (g_enabled && g_stickyClock && g_clockBaselineReady &&
+        !CGRectEqualToRect(g_baseClockBranchFrame, CGRectZero)) {
+        UIView *clockBranch = g_clockBranch;
+        if (clockBranch && clockBranch.superview == (UIView *)self) {
+            CGRect f = clockBranch.frame;
+            f.origin.y = g_baseClockBranchFrame.origin.y;
+            clockBranch.frame = f;
+        }
+    }
+}
 
 static void ld_csViewWillAppear(id self, SEL selector, BOOL animated) {
     if (g_origCSAppear) ((LDViewAppearFn)g_origCSAppear)(self, selector, animated);
@@ -635,6 +716,7 @@ static void ld_init(void) {
 
         Class cs = NSClassFromString(@"CSCoverSheetViewController");
         Class sb = NSClassFromString(@"SBCoverSheetViewController");
+        Class csView = NSClassFromString(@"CSCoverSheetView");
         if (cs) {
             g_origCSAppear = ld_swizzle(cs, @selector(viewWillAppear:),
                                         (IMP)ld_csViewWillAppear);
@@ -647,10 +729,15 @@ static void ld_init(void) {
             g_origSBDisappear = ld_swizzle(sb, @selector(viewDidDisappear:),
                                            (IMP)ld_sbViewDidDisappear);
         }
+        if (csView) {
+            g_origCSLayoutDateView = ld_swizzle(csView, @selector(_layoutDateView),
+                                                (IMP)ld_csLayoutDateView);
+        }
 
-        ld_log(@"loaded enabled=%d maxAlpha=%.2f CS=%@ SB=%@",
-               g_enabled, g_maxAlpha,
+        ld_log(@"loaded enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ CSView=%@",
+               g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
-               sb ? NSStringFromClass(sb) : @"missing");
+               sb ? NSStringFromClass(sb) : @"missing",
+               csView ? NSStringFromClass(csView) : @"missing");
     }
 }

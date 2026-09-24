@@ -4,6 +4,8 @@
 <dict>
     <key>enabled</key>
     <true/>
+    <key>stickyClock</key>
+    <true/>
     <key>maxAlpha</key>
     <real>0.48</real>
     <key>debug</key>
