@@ -10,7 +10,7 @@
     <real>0.48</real>
     <key>roundBatteryEnabled</key>
     <true/>
-    <key>noBatteryGapEnabled</key>
+    <key>ios27BatteryStyleEnabled</key>
     <true/>
     <key>batteryOutsideRadius</key>
     <real>3.8</real>

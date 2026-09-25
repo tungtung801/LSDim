@@ -1050,8 +1050,9 @@ static void ld_sbViewDidDisappear(id self, SEL selector, BOOL animated) {
 }
 
 static BOOL ld_isInsideControlCenter(UIView *view) {
-    if (!view) return NO;
-    for (UIView *v = view; v; v = v.superview) {
+    if (!view || ![view isKindOfClass:[UIView class]]) return NO;
+    int depth = 0;
+    for (UIView *v = view; v && depth < 20; v = v.superview, depth++) {
         NSString *cls = NSStringFromClass(v.class);
         if ([cls containsString:@"CCUI"] || [cls containsString:@"ControlCenter"]) {
             return YES;
@@ -1078,8 +1079,7 @@ static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
 static double ld_batteryInsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
         double outR = ld_batteryOutsideRadius(self, _cmd, trait);
-        double inset = (g_noBatteryGapEnabled ? 1.0 : 1.6);
-        return fmax(1.0, outR - inset);
+        return fmax(1.0, outR - 1.0);
     }
     if (g_origBatteryInsideRadius) {
         return ((double (*)(id, SEL, id))g_origBatteryInsideRadius)(self, _cmd, trait);
@@ -1088,7 +1088,7 @@ static double ld_batteryInsideRadius(id self, SEL _cmd, id trait) {
 }
 
 static double ld_batteryLineWidthAndInterspace(id self, SEL _cmd, id trait) {
-    if (g_roundBatteryEnabled && g_noBatteryGapEnabled) {
+    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
         if ([self isKindOfClass:[UIView class]] && ld_isInsideControlCenter((UIView *)self)) {
             return 1.15;
         }
@@ -1101,7 +1101,7 @@ static double ld_batteryLineWidthAndInterspace(id self, SEL _cmd, id trait) {
 }
 
 static double ld_batteryLineWidthAndInterspaceClass(id self, SEL _cmd, long long iconSize) {
-    if (g_roundBatteryEnabled && g_noBatteryGapEnabled) {
+    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
         return (iconSize == 2) ? 1.15 : 1.0;
     }
     if (g_origBatteryLineWidthAndInterspaceClass) {
@@ -1110,125 +1110,87 @@ static double ld_batteryLineWidthAndInterspaceClass(id self, SEL _cmd, long long
     return 1.0;
 }
 
-static void ld_batteryView_applyNoGap(UIView *self) {
-    if (!g_roundBatteryEnabled) return;
-    @try {
-        BOOL isCC = ld_isInsideControlCenter(self);
-        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.8;
-        double outR = isCC ? (baseOut * 1.15) : baseOut;
-        double strokeW = 1.0;
-        double inset = (g_noBatteryGapEnabled ? strokeW : 1.6);
-        double inR = fmax(1.0, outR - inset);
+static bool ld_batteryShowsPercentage(id self, SEL _cmd) {
+    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
+        return YES;
+    }
+    if (g_origBatteryShowsPercentage) {
+        return ((bool (*)(id, SEL))g_origBatteryShowsPercentage)(self, _cmd);
+    }
+    return YES;
+}
 
-        CALayer *body = nil;
-        @try { body = [self valueForKey:@"bodyLayer"]; } @catch (NSException *ex) {}
-        if (!body) {
-            Ivar iv = class_getInstanceVariable(self.class, "_bodyLayer");
-            if (iv) body = object_getIvar(self, iv);
-        }
-        if (body) {
-            body.cornerCurve = kCACornerCurveContinuous;
-        }
+static bool ld_batteryCurrentlyShowsPercentage(id self, SEL _cmd) {
+    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
+        return YES;
+    }
+    if (g_origBatteryCurrentlyShowsPercentage) {
+        return ((bool (*)(id, SEL))g_origBatteryCurrentlyShowsPercentage)(self, _cmd);
+    }
+    return YES;
+}
 
-        CALayer *fill = nil;
-        @try { fill = [self valueForKey:@"fillLayer"]; } @catch (NSException *ex) {}
-        if (!fill) {
-            Ivar iv = class_getInstanceVariable(self.class, "_fillLayer");
-            if (iv) fill = object_getIvar(self, iv);
-        }
-        if (fill) {
-            fill.cornerCurve = kCACornerCurveContinuous;
-            fill.cornerRadius = inR;
-
-            if (g_noBatteryGapEnabled) {
-                BOOL showsPercent = NO;
-                @try {
-                    showsPercent = [[self valueForKey:@"showsPercentage"] boolValue];
-                } @catch (NSException *ex) {}
-
-                if (!showsPercent) {
-                    // Hide percentage number if present
-                    UILabel *lbl = nil;
-                    @try { lbl = [self valueForKey:@"percentageLabel"]; } @catch (NSException *ex) {}
-                    if (lbl) {
-                        lbl.hidden = YES;
-                        lbl.alpha = 0.0;
-                    }
-
-                    // Extract the active fill color
-                    CGColorRef fillCG = fill.backgroundColor;
-                    UIColor *fillCol = fillCG ? [UIColor colorWithCGColor:fillCG] : nil;
-                    if (!fillCol) {
-                        @try { fillCol = [self valueForKey:@"fillColor"]; } @catch (NSException *ex) {}
-                    }
-                    if (!fillCol) {
-                        fillCol = [UIColor whiteColor];
-                    }
-
-                    // Apply translucent background to the body for the depleted portion
-                    if ([body isKindOfClass:[CAShapeLayer class]]) {
-                        ((CAShapeLayer *)body).fillColor = [fillCol colorWithAlphaComponent:0.25].CGColor;
-                    } else if (body) {
-                        body.backgroundColor = [fillCol colorWithAlphaComponent:0.25].CGColor;
-                    }
-
-                    CGRect bodyFrame = (body && body.frame.size.width > 0) ? body.frame : CGRectZero;
-                    if (bodyFrame.size.width <= 0.0 || bodyFrame.size.height <= 0.0) {
-                        bodyFrame = CGRectMake(0, 0, self.bounds.size.width - 2.5, self.bounds.size.height);
-                    }
-
-                    double charge = 1.0;
-                    @try {
-                        charge = [[self valueForKey:@"chargePercent"] doubleValue];
-                    } @catch (NSException *ex) {}
-                    if (charge <= 0.0) {
-                        Ivar iv = class_getInstanceVariable(self.class, "_chargePercent");
-                        if (iv) {
-                            ptrdiff_t offset = ivar_getOffset(iv);
-                            charge = *(double *)((char *)(__bridge void *)self + offset);
-                        }
-                    }
-                    if (charge < 0.0) charge = 0.0;
-                    if (charge > 1.0) charge = 1.0;
-
-                    CGFloat availW = fmax(0.0, bodyFrame.size.width - (strokeW * 2.0));
-                    CGFloat availH = fmax(0.0, bodyFrame.size.height - (strokeW * 2.0));
-                    CGFloat fillW = availW * (CGFloat)charge;
-
-                    CGRect noGapFrame = CGRectMake(bodyFrame.origin.x + strokeW,
-                                                   bodyFrame.origin.y + strokeW,
-                                                   fillW,
-                                                   availH);
-
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    fill.frame = noGapFrame;
-                    [CATransaction commit];
-                }
+static void ld_batteryView_updatePercentage(UIView *self, SEL _cmd) {
+    if (g_origBatteryUpdatePercentage) {
+        ((void (*)(id, SEL))g_origBatteryUpdatePercentage)(self, _cmd);
+    }
+    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
+        @try {
+            UILabel *lbl = [self valueForKey:@"percentageLabel"];
+            if (lbl) {
+                lbl.hidden = YES;
+                lbl.alpha = 0.0;
+                lbl.text = @"";
             }
-        }
-    } @catch (NSException *e) {}
+        } @catch (NSException *e) {}
+    }
 }
 
-static void ld_batteryView_updateFillLayer(UIView *self, SEL _cmd) {
-    if (g_origBatteryUpdateFillLayer) {
-        ((void (*)(id, SEL))g_origBatteryUpdateFillLayer)(self, _cmd);
-    }
-    ld_batteryView_applyNoGap(self);
-}
-
-static void ld_batteryView_updateBodyColors(UIView *self, SEL _cmd) {
-    if (g_origBatteryUpdateBodyColors) {
-        ((void (*)(id, SEL))g_origBatteryUpdateBodyColors)(self, _cmd);
-    }
-    ld_batteryView_applyNoGap(self);
-}
+static BOOL s_inBatteryLayout = NO;
 
 static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
+    if (s_inBatteryLayout) {
+        if (g_origBatteryLayoutSubviews) {
+            ((void (*)(id, SEL))g_origBatteryLayoutSubviews)(self, _cmd);
+        }
+        return;
+    }
+    s_inBatteryLayout = YES;
     if (g_origBatteryLayoutSubviews) {
         ((void (*)(id, SEL))g_origBatteryLayoutSubviews)(self, _cmd);
     }
-    ld_batteryView_applyNoGap(self);
+    if (g_roundBatteryEnabled) {
+        @try {
+            BOOL isCC = ld_isInsideControlCenter(self);
+            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.8;
+            double outR = isCC ? (baseOut * 1.15) : baseOut;
+            double inR = fmax(1.0, outR - 1.0);
+
+            CALayer *body = nil;
+            @try { body = [self valueForKey:@"bodyLayer"]; } @catch (NSException *ex) {}
+            if (body) {
+                body.cornerCurve = kCACornerCurveContinuous;
+            }
+
+            CALayer *fill = nil;
+            @try { fill = [self valueForKey:@"fillLayer"]; } @catch (NSException *ex) {}
+            if (fill) {
+                fill.cornerCurve = kCACornerCurveContinuous;
+                fill.cornerRadius = inR;
+            }
+
+            if (g_ios27BatteryStyleEnabled) {
+                UILabel *lbl = nil;
+                @try { lbl = [self valueForKey:@"percentageLabel"]; } @catch (NSException *ex) {}
+                if (lbl) {
+                    lbl.hidden = YES;
+                    lbl.alpha = 0.0;
+                    lbl.text = @"";
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+    s_inBatteryLayout = NO;
 }
 
 static void ld_installBatteryHooksForClass(Class cls) {
@@ -1254,15 +1216,20 @@ static void ld_installBatteryHooksForClass(Class cls) {
                               (IMP)ld_batteryLineWidthAndInterspaceClass);
         if (!g_origBatteryLineWidthAndInterspaceClass) g_origBatteryLineWidthAndInterspaceClass = orig;
     }
-    if (class_getInstanceMethod(cls, @selector(_updateFillLayer))) {
-        IMP orig = ld_swizzle(cls, @selector(_updateFillLayer),
-                              (IMP)ld_batteryView_updateFillLayer);
-        if (!g_origBatteryUpdateFillLayer) g_origBatteryUpdateFillLayer = orig;
+    if (class_getInstanceMethod(cls, @selector(showsPercentage))) {
+        IMP orig = ld_swizzle(cls, @selector(showsPercentage),
+                              (IMP)ld_batteryShowsPercentage);
+        if (!g_origBatteryShowsPercentage) g_origBatteryShowsPercentage = orig;
     }
-    if (class_getInstanceMethod(cls, @selector(_updateBodyColors))) {
-        IMP orig = ld_swizzle(cls, @selector(_updateBodyColors),
-                              (IMP)ld_batteryView_updateBodyColors);
-        if (!g_origBatteryUpdateBodyColors) g_origBatteryUpdateBodyColors = orig;
+    if (class_getInstanceMethod(cls, @selector(_currentlyShowsPercentage))) {
+        IMP orig = ld_swizzle(cls, @selector(_currentlyShowsPercentage),
+                              (IMP)ld_batteryCurrentlyShowsPercentage);
+        if (!g_origBatteryCurrentlyShowsPercentage) g_origBatteryCurrentlyShowsPercentage = orig;
+    }
+    if (class_getInstanceMethod(cls, @selector(_updatePercentage))) {
+        IMP orig = ld_swizzle(cls, @selector(_updatePercentage),
+                              (IMP)ld_batteryView_updatePercentage);
+        if (!g_origBatteryUpdatePercentage) g_origBatteryUpdatePercentage = orig;
     }
     IMP origLayout = ld_swizzle(cls, @selector(layoutSubviews),
                                 (IMP)ld_batteryView_layoutSubviews);
@@ -1306,9 +1273,14 @@ static void ld_init(void) {
                                                  (IMP)ld_sbfDateView_layoutSubviews);
         }
 
-        ld_installBatteryHooksForClass(NSClassFromString(@"_UIBatteryView"));
-        ld_installBatteryHooksForClass(NSClassFromString(@"_UIStaticBatteryView"));
-        ld_installBatteryHooksForClass(NSClassFromString(@"STUIStatusBarStaticBatteryView"));
+        Class bView = NSClassFromString(@"_UIBatteryView");
+        if (bView) {
+            ld_installBatteryHooksForClass(bView);
+        }
+        Class stView = NSClassFromString(@"STUIStatusBarStaticBatteryView");
+        if (stView && stView != bView && ![stView isSubclassOfClass:bView]) {
+            ld_installBatteryHooksForClass(stView);
+        }
 
         ld_installLiquidGlassHooks();
 
