@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.1.6
+ * 26LockDim 0.1.7
  *
  * Lock Screen notification background dimming, kept separate from 26Unlock.
  * The tweak observes the live CoverSheet hierarchy and writes only a black
@@ -31,7 +31,9 @@ static __weak UIScrollView *g_notificationScroll;
 static __weak UIView *g_clockContainerView;
 static __weak UIView *g_clockTimeView;
 static __weak UIView *g_overlayHost;
+static __weak UIView *g_maskedView;
 static UIView *g_overlay;
+static CALayer *g_scrollMaskLayer;
 static CADisplayLink *g_displayLink;
 static NSObject *g_displayTarget;
 
@@ -44,6 +46,7 @@ static CGRect   g_baseRect;
 static CGFloat  g_baseOffsetY;
 static CGSize   g_baseRootSize;
 static CGFloat  g_baseClockTopOnScreen;
+static CGFloat  g_baseClockBottomOnScreen;
 static BOOL     g_clockBaselineReady;
 static CGFloat  g_currentClockTranslateY;
 static CGFloat  g_alpha;
@@ -325,6 +328,7 @@ static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
             CGRect r = [timeView convertRect:timeView.bounds toView:nil];
             if (r.size.height > 10.0 && r.origin.y > 10.0) {
                 g_baseClockTopOnScreen = r.origin.y;
+                g_baseClockBottomOnScreen = CGRectGetMaxY(r) + 8.0;
                 g_clockBaselineReady = YES;
                 g_currentClockTranslateY = 0.0f;
                 if (container) {
@@ -334,10 +338,10 @@ static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
         } @catch (NSException *e) {}
     }
 
-    ld_log(@"baseline scroll=%@ rect=%@ offsetY=%.2f root=%@ clockTop=%.1f container=%@ time=%@",
+    ld_log(@"baseline scroll=%@ rect=%@ offsetY=%.2f root=%@ clockTop=%.1f bottom=%.1f",
            ld_className(scroll), NSStringFromCGRect(g_baseRect),
-           g_baseOffsetY, NSStringFromClass([root class]), g_baseClockTopOnScreen,
-           ld_className(container), ld_className(timeView));
+           g_baseOffsetY, NSStringFromClass([root class]),
+           g_baseClockTopOnScreen, g_baseClockBottomOnScreen);
 }
 
 /* Put the overlay in the full-screen ancestor immediately below the direct
@@ -440,6 +444,12 @@ static CGFloat ld_progressForScroll(UIScrollView *scroll, UIView *root) {
 static void ld_setActive(BOOL active) {
     g_active = active;
     if (!active) {
+        if (g_maskedView) {
+            g_maskedView.layer.mask = nil;
+            g_maskedView = nil;
+        }
+        g_scrollMaskLayer = nil;
+
         if (g_clockContainerView) {
             @try {
                 g_clockContainerView.transform = CGAffineTransformIdentity;
@@ -450,6 +460,7 @@ static void ld_setActive(BOOL active) {
         g_clockBaselineReady = NO;
         g_currentClockTranslateY = 0.0f;
         g_baseClockTopOnScreen = 0.0f;
+        g_baseClockBottomOnScreen = 0.0f;
 
         if (g_displayLink) {
             [g_displayLink invalidate];
@@ -577,10 +588,12 @@ static void ld_tick_impl(CADisplayLink *link) {
                     CGRect r = [timeView convertRect:timeView.bounds toView:nil];
                     if (r.size.height > 10.0 && r.origin.y > 10.0) {
                         g_baseClockTopOnScreen = r.origin.y;
+                        g_baseClockBottomOnScreen = CGRectGetMaxY(r) + 8.0;
                         g_clockBaselineReady = YES;
                         g_currentClockTranslateY = 0.0f;
                         if (container) container.transform = CGAffineTransformIdentity;
-                        ld_log(@"clock baseline anchored at y=%.1f", g_baseClockTopOnScreen);
+                        ld_log(@"clock baseline anchored top=%.1f bottom=%.1f",
+                               g_baseClockTopOnScreen, g_baseClockBottomOnScreen);
                     }
                 } @catch (NSException *e) {}
             }
@@ -603,10 +616,50 @@ static void ld_tick_impl(CADisplayLink *link) {
                     }
                 } @catch (NSException *e) {}
             }
+
+            // Clip notifications cleanly at the bottom (chân) of the clock
+            if (scroll && root) {
+                UIView *clipHost = scroll.superview;
+                if (clipHost && !ld_isDescendant(timeView, clipHost)) {
+                    @try {
+                        CGFloat clockBottomInRoot = 0.0;
+                        if (g_baseClockBottomOnScreen > 0.0 && root.window) {
+                            CGRect screenRect = CGRectMake(0.0, g_baseClockBottomOnScreen, root.bounds.size.width, 1.0);
+                            CGRect rootRect = [root convertRect:screenRect fromView:nil];
+                            clockBottomInRoot = rootRect.origin.y;
+                        } else {
+                            CGRect clockInRoot = [timeView convertRect:timeView.bounds toView:root];
+                            clockBottomInRoot = CGRectGetMaxY(clockInRoot) + 8.0;
+                        }
+
+                        CGFloat rootW = root.bounds.size.width;
+                        CGFloat rootH = root.bounds.size.height;
+                        if (clockBottomInRoot > 20.0 && clockBottomInRoot < rootH * 0.85) {
+                            CGRect visibleRectInRoot = CGRectMake(0.0, clockBottomInRoot, rootW, rootH - clockBottomInRoot);
+                            CGRect maskRectInHost = [clipHost convertRect:visibleRectInRoot fromView:root];
+
+                            if (!g_scrollMaskLayer) {
+                                g_scrollMaskLayer = [CALayer layer];
+                                g_scrollMaskLayer.backgroundColor = [UIColor whiteColor].CGColor;
+                            }
+                            g_scrollMaskLayer.frame = maskRectInHost;
+                            if (clipHost.layer.mask != g_scrollMaskLayer) {
+                                clipHost.layer.mask = g_scrollMaskLayer;
+                                g_maskedView = clipHost;
+                            }
+                        }
+                    } @catch (NSException *e) {}
+                }
+            }
         }
     } else if (g_clockContainerView && fabs(g_currentClockTranslateY) > 0.0f) {
         g_clockContainerView.transform = CGAffineTransformIdentity;
         g_currentClockTranslateY = 0.0f;
+        if (g_maskedView) {
+            g_maskedView.layer.mask = nil;
+            g_maskedView = nil;
+        }
+        g_scrollMaskLayer = nil;
     }
 
     if (g_debug && now - g_lastLog > 0.20) {
@@ -665,6 +718,7 @@ typedef double (*LDTimeLabelOffsetFn)(id, SEL, double);
 typedef double (*LDTimeScrollPercentFn)(id, SEL, unsigned long long);
 typedef void (*LDSetDateOffsetFn)(id, SEL, CGPoint);
 typedef CGPoint (*LDGetDateOffsetFn)(id, SEL);
+typedef double (*LDClippingOffsetFn)(id, SEL);
 
 static IMP g_origCSAppear = NULL;
 static IMP g_origCSDisappear = NULL;
@@ -676,6 +730,7 @@ static IMP g_origTimeLabelOffset = NULL;
 static IMP g_origTimeScrollPercent = NULL;
 static IMP g_origSetDateOffset = NULL;
 static IMP g_origGetDateOffset = NULL;
+static IMP g_origClippingOffset = NULL;
 
 static BOOL ld_csAllowsDateScroll(id self, SEL selector) {
     if (g_enabled && g_stickyClock) return NO;
@@ -693,8 +748,13 @@ static void ld_csUpdateDateAppearance(id self, SEL selector, BOOL hidden, CGPoin
     }
 }
 
+/* Return the natural resting time label offset (at percent = 0.0) instead of 0.0 */
 static double ld_csTimeLabelOffset(id self, SEL selector, double percent) {
-    if (g_enabled && g_stickyClock) return 0.0;
+    if (g_enabled && g_stickyClock) {
+        if (g_origTimeLabelOffset) {
+            return ((LDTimeLabelOffsetFn)g_origTimeLabelOffset)(self, selector, 0.0);
+        }
+    }
     if (g_origTimeLabelOffset) return ((LDTimeLabelOffsetFn)g_origTimeLabelOffset)(self, selector, percent);
     return 0.0;
 }
@@ -721,6 +781,14 @@ static CGPoint ld_csGetDateOffset(id self, SEL selector) {
     }
     if (g_origGetDateOffset) return ((LDGetDateOffsetFn)g_origGetDateOffset)(self, selector);
     return CGPointZero;
+}
+
+static double ld_csClippingOffset(id self, SEL selector) {
+    if (g_enabled && g_stickyClock && g_baseClockBottomOnScreen > 0.0) {
+        return g_baseClockBottomOnScreen;
+    }
+    if (g_origClippingOffset) return ((LDClippingOffsetFn)g_origClippingOffset)(self, selector);
+    return 0.0;
 }
 
 static void ld_csViewWillAppear(id self, SEL selector, BOOL animated) {
@@ -798,6 +866,8 @@ static void ld_init(void) {
                                                 (IMP)ld_csAllowsDateScroll);
             g_origUpdateDateAppearance = ld_swizzle(combList, @selector(updateAppearanceForHidden:offset:),
                                                     (IMP)ld_csUpdateDateAppearance);
+            g_origClippingOffset = ld_swizzle(combList, @selector(clippingOffset),
+                                              (IMP)ld_csClippingOffset);
         }
 
         ld_log(@"loaded enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ CSView=%@ List=%@",
