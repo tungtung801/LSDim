@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.4
+ * 26LockDim 0.2.5
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -28,10 +28,17 @@
 #define LD_LOGFILE  "/var/mobile/26LockDim.log"
 #define LD_SAFEFILE @"/var/mobile/Media/26LockDim.safe"
 
-static BOOL  g_enabled     = YES;
-static BOOL  g_debug       = YES;
-static BOOL  g_stickyClock = YES;
-static float g_maxAlpha    = 0.48f;
+static BOOL   g_enabled              = YES;
+static BOOL   g_debug                = YES;
+static BOOL   g_stickyClock          = YES;
+static float  g_maxAlpha             = 0.48f;
+static BOOL   g_roundBatteryEnabled  = YES;
+static double g_batteryOutsideRadius = 5.0;
+static double g_batteryInsideRadius  = 3.0;
+
+static IMP g_origBatteryOutsideRadius = NULL;
+static IMP g_origBatteryInsideRadius  = NULL;
+static IMP g_origBatteryLayoutSubviews = NULL;
 
 static __weak UIViewController *g_coverController;
 static __weak UIView *g_coverRoot;
@@ -113,6 +120,18 @@ static void ld_readSettings(void) {
     value = settings[@"maxAlpha"];
     if ([value isKindOfClass:[NSNumber class]])
         g_maxAlpha = ld_clampf([value floatValue], 0.0f, 0.85f);
+
+    value = settings[@"roundBatteryEnabled"];
+    if ([value isKindOfClass:[NSNumber class]])
+        g_roundBatteryEnabled = [value boolValue];
+
+    value = settings[@"batteryOutsideRadius"];
+    if ([value isKindOfClass:[NSNumber class]])
+        g_batteryOutsideRadius = [value doubleValue];
+
+    value = settings[@"batteryInsideRadius"];
+    if ([value isKindOfClass:[NSNumber class]])
+        g_batteryInsideRadius = [value doubleValue];
 }
 
 static void ld_clearSafetyMarker(void) {
@@ -1021,6 +1040,48 @@ static void ld_sbViewDidDisappear(id self, SEL selector, BOOL animated) {
     ld_stopIfController(self);
 }
 
+static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
+    if (g_roundBatteryEnabled) {
+        return (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 5.0;
+    }
+    if (g_origBatteryOutsideRadius) {
+        return ((double (*)(id, SEL, id))g_origBatteryOutsideRadius)(self, _cmd, trait);
+    }
+    return 3.0;
+}
+
+static double ld_batteryInsideRadius(id self, SEL _cmd, id trait) {
+    if (g_roundBatteryEnabled) {
+        return (g_batteryInsideRadius > 0.0) ? g_batteryInsideRadius : 3.0;
+    }
+    if (g_origBatteryInsideRadius) {
+        return ((double (*)(id, SEL, id))g_origBatteryInsideRadius)(self, _cmd, trait);
+    }
+    return 1.5;
+}
+
+static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
+    if (g_origBatteryLayoutSubviews) {
+        ((void (*)(id, SEL))g_origBatteryLayoutSubviews)(self, _cmd);
+    }
+    if (g_roundBatteryEnabled) {
+        @try {
+            CALayer *body = [self valueForKey:@"bodyLayer"];
+            if (body) {
+                body.cornerCurve = kCACornerCurveContinuous;
+            }
+            CALayer *fill = [self valueForKey:@"fillLayer"];
+            if (fill) {
+                fill.cornerCurve = kCACornerCurveContinuous;
+                double r = (g_batteryInsideRadius > 0.0) ? g_batteryInsideRadius : 3.0;
+                if (fill.cornerRadius < r) {
+                    fill.cornerRadius = r;
+                }
+            }
+        } @catch (NSException *e) {}
+    }
+}
+
 __attribute__((constructor))
 static void ld_init(void) {
     @autoreleasepool {
@@ -1058,9 +1119,26 @@ static void ld_init(void) {
                                                  (IMP)ld_sbfDateView_layoutSubviews);
         }
 
+        Class bvClass = NSClassFromString(@"_UIBatteryView");
+        if (bvClass) {
+            if (class_getInstanceMethod(bvClass, @selector(_outsideCornerRadiusForTraitCollection:))) {
+                g_origBatteryOutsideRadius = ld_swizzle(bvClass,
+                    @selector(_outsideCornerRadiusForTraitCollection:),
+                    (IMP)ld_batteryOutsideRadius);
+            }
+            if (class_getInstanceMethod(bvClass, @selector(_insideCornerRadiusForTraitCollection:))) {
+                g_origBatteryInsideRadius = ld_swizzle(bvClass,
+                    @selector(_insideCornerRadiusForTraitCollection:),
+                    (IMP)ld_batteryInsideRadius);
+            }
+            g_origBatteryLayoutSubviews = ld_swizzle(bvClass,
+                @selector(layoutSubviews),
+                (IMP)ld_batteryView_layoutSubviews);
+        }
+
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.4 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.5 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",

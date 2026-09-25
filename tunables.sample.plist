@@ -8,6 +8,12 @@
     <true/>
     <key>maxAlpha</key>
     <real>0.48</real>
+    <key>roundBatteryEnabled</key>
+    <true/>
+    <key>batteryOutsideRadius</key>
+    <real>5.0</real>
+    <key>batteryInsideRadius</key>
+    <real>3.0</real>
     <key>debug</key>
     <true/>
 </dict>
