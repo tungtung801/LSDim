@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.2
+ * 26LockDim 0.2.3
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -996,6 +996,66 @@ static void ld_sbfDateView_layoutSubviews(UIView *self, SEL _cmd) {
     }
 }
 
+static IMP g_origLGApplyReason = NULL;
+static IMP g_origLGTrackMotion = NULL;
+static IMP g_origLGTick = NULL;
+
+static void ld_lgClockState_applyReason(id self, SEL selector, NSString *reason) {
+    if (g_enabled && g_stickyClock) {
+        if ([reason isEqualToString:@"motion"]) {
+            // Override Liquid Glass: drop @"motion" to prevent it from sliding the clock off-screen!
+            return;
+        }
+    }
+    if (g_origLGApplyReason) {
+        ((void (*)(id, SEL, NSString *))g_origLGApplyReason)(self, selector, reason);
+    }
+}
+
+static void ld_lgClockMotionTracker_trackMotion(id self, SEL selector) {
+    if (g_enabled && g_stickyClock) {
+        // Prevent Liquid Glass from starting CADisplayLink motion loop during notification scrolling
+        return;
+    }
+    if (g_origLGTrackMotion) {
+        ((void (*)(id, SEL))g_origLGTrackMotion)(self, selector);
+    }
+}
+
+static void ld_lgClockMotionTracker_tick(id self, SEL selector, CADisplayLink *link) {
+    if (g_enabled && g_stickyClock) {
+        if (link) link.paused = YES;
+        return;
+    }
+    if (g_origLGTick) {
+        ((void (*)(id, SEL, CADisplayLink *))g_origLGTick)(self, selector, link);
+    }
+}
+
+static void ld_installLiquidGlassHooks(void) {
+    static BOOL s_installed = NO;
+    if (s_installed) return;
+
+    Class lgState = NSClassFromString(@"LGClockState");
+    Class lgTracker = NSClassFromString(@"LGClockMotionTracker");
+
+    if (lgState || lgTracker) {
+        s_installed = YES;
+        if (lgState) {
+            g_origLGApplyReason = ld_swizzle(lgState, @selector(applyReason:),
+                                             (IMP)ld_lgClockState_applyReason);
+        }
+        if (lgTracker) {
+            g_origLGTrackMotion = ld_swizzle(lgTracker, @selector(trackMotion),
+                                             (IMP)ld_lgClockMotionTracker_trackMotion);
+            g_origLGTick = ld_swizzle(lgTracker, @selector(tick:),
+                                      (IMP)ld_lgClockMotionTracker_tick);
+        }
+        ld_log(@"Liquid Glass override installed: state=%p tracker=%p applyReason=%p trackMotion=%p tick=%p",
+               lgState, lgTracker, g_origLGApplyReason, g_origLGTrackMotion, g_origLGTick);
+    }
+}
+
 static BOOL ld_csAllowsDateScroll(id self, SEL selector) {
     if (g_enabled && g_stickyClock) return NO;
     if (g_origAllowsDateScroll) return ((LDAllowsDateScrollFn)g_origAllowsDateScroll)(self, selector);
@@ -1022,6 +1082,7 @@ static double ld_csClippingOffset(id self, SEL selector) {
 
 static void ld_csViewWillAppear(id self, SEL selector, BOOL animated) {
     if (g_origCSAppear) ((LDViewAppearFn)g_origCSAppear)(self, selector, animated);
+    ld_installLiquidGlassHooks();
     @try {
         ld_start((UIViewController *)self);
     } @catch (NSException *exception) {
@@ -1038,6 +1099,7 @@ static void ld_csViewDidDisappear(id self, SEL selector, BOOL animated) {
 
 static void ld_sbViewWillAppear(id self, SEL selector, BOOL animated) {
     if (g_origSBAppear) ((LDViewAppearFn)g_origSBAppear)(self, selector, animated);
+    ld_installLiquidGlassHooks();
     @try {
         ld_start((UIViewController *)self);
     } @catch (NSException *exception) {
@@ -1098,7 +1160,9 @@ static void ld_init(void) {
                                                  (IMP)ld_sbfDateView_layoutSubviews);
         }
 
-        ld_log(@"loaded v0.2.2 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ List=%@ PromDisplay=%@ SBFDate=%@",
+        ld_installLiquidGlassHooks();
+
+        ld_log(@"loaded v0.2.3 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ List=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",

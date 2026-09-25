@@ -1,6 +1,6 @@
 Package: com.tungtung801.26lockdim
 Name: 26LockDim
-Version: 0.2.2
+Version: 0.2.3
 Architecture: iphoneos-arm64
 Description: Lock Screen notification background dimming
 Maintainer: tungtung801
