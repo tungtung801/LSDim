@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.14
+ * 26LockDim 0.2.15
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -34,14 +34,15 @@ static BOOL   g_stickyClock          = YES;
 static float  g_maxAlpha             = 0.48f;
 static BOOL   g_roundBatteryEnabled  = YES;
 static BOOL   g_noBatteryGapEnabled  = YES;
-static double g_batteryOutsideRadius = 3.4;
-static double g_batteryInsideRadius  = 2.4;
+static double g_batteryOutsideRadius = 3.8;
+static double g_batteryInsideRadius  = 2.8;
 
 static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
 static IMP g_origBatteryLineWidthAndInterspace = NULL;
 static IMP g_origBatteryLineWidthAndInterspaceClass = NULL;
 static IMP g_origBatteryUpdateFillLayer = NULL;
+static IMP g_origBatteryUpdateBodyColors = NULL;
 static IMP g_origBatteryLayoutSubviews = NULL;
 
 static __weak UIViewController *g_coverController;
@@ -1061,7 +1062,7 @@ static BOOL ld_isInsideControlCenter(UIView *view) {
 
 static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
-        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.4;
+        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.8;
         if ([self isKindOfClass:[UIView class]] && ld_isInsideControlCenter((UIView *)self)) {
             // Scale proportionally for Control Center expanded status bar
             return baseOut * 1.15;
@@ -1113,7 +1114,7 @@ static void ld_batteryView_applyNoGap(UIView *self) {
     if (!g_roundBatteryEnabled) return;
     @try {
         BOOL isCC = ld_isInsideControlCenter(self);
-        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.4;
+        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.8;
         double outR = isCC ? (baseOut * 1.15) : baseOut;
         double strokeW = 1.0;
         double inset = (g_noBatteryGapEnabled ? strokeW : 1.6);
@@ -1146,6 +1147,31 @@ static void ld_batteryView_applyNoGap(UIView *self) {
                 } @catch (NSException *ex) {}
 
                 if (!showsPercent) {
+                    // Hide percentage number if present
+                    UILabel *lbl = nil;
+                    @try { lbl = [self valueForKey:@"percentageLabel"]; } @catch (NSException *ex) {}
+                    if (lbl) {
+                        lbl.hidden = YES;
+                        lbl.alpha = 0.0;
+                    }
+
+                    // Extract the active fill color
+                    CGColorRef fillCG = fill.backgroundColor;
+                    UIColor *fillCol = fillCG ? [UIColor colorWithCGColor:fillCG] : nil;
+                    if (!fillCol) {
+                        @try { fillCol = [self valueForKey:@"fillColor"]; } @catch (NSException *ex) {}
+                    }
+                    if (!fillCol) {
+                        fillCol = [UIColor whiteColor];
+                    }
+
+                    // Apply translucent background to the body for the depleted portion
+                    if ([body isKindOfClass:[CAShapeLayer class]]) {
+                        ((CAShapeLayer *)body).fillColor = [fillCol colorWithAlphaComponent:0.25].CGColor;
+                    } else if (body) {
+                        body.backgroundColor = [fillCol colorWithAlphaComponent:0.25].CGColor;
+                    }
+
                     CGRect bodyFrame = (body && body.frame.size.width > 0) ? body.frame : CGRectZero;
                     if (bodyFrame.size.width <= 0.0 || bodyFrame.size.height <= 0.0) {
                         bodyFrame = CGRectMake(0, 0, self.bounds.size.width - 2.5, self.bounds.size.height);
@@ -1191,6 +1217,13 @@ static void ld_batteryView_updateFillLayer(UIView *self, SEL _cmd) {
     ld_batteryView_applyNoGap(self);
 }
 
+static void ld_batteryView_updateBodyColors(UIView *self, SEL _cmd) {
+    if (g_origBatteryUpdateBodyColors) {
+        ((void (*)(id, SEL))g_origBatteryUpdateBodyColors)(self, _cmd);
+    }
+    ld_batteryView_applyNoGap(self);
+}
+
 static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
     if (g_origBatteryLayoutSubviews) {
         ((void (*)(id, SEL))g_origBatteryLayoutSubviews)(self, _cmd);
@@ -1225,6 +1258,11 @@ static void ld_installBatteryHooksForClass(Class cls) {
         IMP orig = ld_swizzle(cls, @selector(_updateFillLayer),
                               (IMP)ld_batteryView_updateFillLayer);
         if (!g_origBatteryUpdateFillLayer) g_origBatteryUpdateFillLayer = orig;
+    }
+    if (class_getInstanceMethod(cls, @selector(_updateBodyColors))) {
+        IMP orig = ld_swizzle(cls, @selector(_updateBodyColors),
+                              (IMP)ld_batteryView_updateBodyColors);
+        if (!g_origBatteryUpdateBodyColors) g_origBatteryUpdateBodyColors = orig;
     }
     IMP origLayout = ld_swizzle(cls, @selector(layoutSubviews),
                                 (IMP)ld_batteryView_layoutSubviews);
@@ -1274,7 +1312,7 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.14 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.15 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
