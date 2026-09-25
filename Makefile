@@ -11,7 +11,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = 26LockDim
 
 26LockDim_FILES = Tweak.xm
-26LockDim_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
+26LockDim_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-function
 26LockDim_FRAMEWORKS = UIKit QuartzCore CoreGraphics
 
 include $(THEOS_MAKE_PATH)/tweak.mk

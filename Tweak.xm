@@ -467,17 +467,6 @@ static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
            ld_className(scroll), NSStringFromCGRect(g_baseRect), g_baseOffsetY);
 }
 
-static UIView *ld_findLowestDescendant(UIView *view, UIView *target) {
-    if (!view || !target) return nil;
-    if (view == target) return view;
-
-    for (UIView *sub in view.subviews) {
-        if (sub == target || ld_isDescendant(target, sub))
-            return sub;
-    }
-    return nil;
-}
-
 static UIView *ld_findInsertionBranch(UIView *root, UIView *child) {
     if (!root || !child) return nil;
     UIView *cur = child;
