@@ -32,17 +32,18 @@ static BOOL   g_enabled              = YES;
 static BOOL   g_debug                = YES;
 static BOOL   g_stickyClock          = YES;
 static float  g_maxAlpha             = 0.48f;
-static BOOL   g_roundBatteryEnabled  = YES;
-static BOOL   g_noBatteryGapEnabled  = YES;
-static double g_batteryOutsideRadius = 3.8;
-static double g_batteryInsideRadius  = 2.8;
+static BOOL   g_roundBatteryEnabled      = YES;
+static BOOL   g_ios27BatteryStyleEnabled = YES;
+static double g_batteryOutsideRadius     = 3.8;
+static double g_batteryInsideRadius      = 2.8;
 
 static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
 static IMP g_origBatteryLineWidthAndInterspace = NULL;
 static IMP g_origBatteryLineWidthAndInterspaceClass = NULL;
-static IMP g_origBatteryUpdateFillLayer = NULL;
-static IMP g_origBatteryUpdateBodyColors = NULL;
+static IMP g_origBatteryShowsPercentage = NULL;
+static IMP g_origBatteryCurrentlyShowsPercentage = NULL;
+static IMP g_origBatteryUpdatePercentage = NULL;
 static IMP g_origBatteryLayoutSubviews = NULL;
 
 static __weak UIViewController *g_coverController;
@@ -138,9 +139,9 @@ static void ld_readSettings(void) {
     if ([value isKindOfClass:[NSNumber class]])
         g_batteryInsideRadius = [value doubleValue];
 
-    value = settings[@"noBatteryGapEnabled"];
+    value = settings[@"ios27BatteryStyleEnabled"];
     if ([value isKindOfClass:[NSNumber class]])
-        g_noBatteryGapEnabled = [value boolValue];
+        g_ios27BatteryStyleEnabled = [value boolValue];
 }
 
 static void ld_clearSafetyMarker(void) {
