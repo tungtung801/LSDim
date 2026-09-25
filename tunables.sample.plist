@@ -13,9 +13,9 @@
     <key>noBatteryGapEnabled</key>
     <true/>
     <key>batteryOutsideRadius</key>
-    <real>3.0</real>
+    <real>3.2</real>
     <key>batteryInsideRadius</key>
-    <real>2.0</real>
+    <real>2.2</real>
     <key>debug</key>
     <true/>
 </dict>
