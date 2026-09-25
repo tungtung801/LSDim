@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.3
+ * 26LockDim 0.2.4
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -799,107 +799,54 @@ static void ld_tick_impl(CADisplayLink *link) {
                 }
             }
 
-            // Active pull/scroll: lock the TOP of the clock digits rigidly in place under the date
-            if (g_clockBaselineReady && timeView) {
-                @try {
-                    CGFloat currentTop = ld_clockTopOnScreen(timeView, container, root);
-                    if (currentTop > 10.0) {
-                        CGFloat naturalTop = currentTop - g_currentClockTranslateY;
-                        CGFloat targetTranslateY = g_baseClockTopOnScreen - naturalTop;
-
-                        if (targetTranslateY < 0.0f) targetTranslateY = 0.0f;
-
-                        if (g_progress < 0.001f && targetTranslateY < 0.5f) {
-                            targetTranslateY = 0.0f;
-                        }
-
-                        CGFloat diff = targetTranslateY - g_currentClockTranslateY;
-                        if (fabs(diff) > 0.05f) {
-                            g_currentClockTranslateY += diff * (1.0f - expf((float)(-dt / 0.035f)));
-                            if (fabs(g_currentClockTranslateY) < 0.05f) g_currentClockTranslateY = 0.0f;
-
-                            CGAffineTransform trans = (g_currentClockTranslateY > 0.05f)
-                                ? CGAffineTransformMakeTranslation(0.0, g_currentClockTranslateY)
-                                : CGAffineTransformIdentity;
-
-                            [CATransaction begin];
-                            [CATransaction setDisableActions:YES];
-
-                            timeView.transform = trans;
-
-                            LDLiquidGlassContext *liq = ld_getLiquidGlassContext(container, timeView, root);
-                            if (liq.glassView && !ld_isDescendant(liq.glassView, timeView)) {
-                                liq.glassView.transform = trans;
-                                g_liquidGlassView = liq.glassView;
-                            }
-                            if (liq.pullBlurView && !ld_isDescendant(liq.pullBlurView, timeView)) {
-                                liq.pullBlurView.transform = trans;
-                                g_liquidPullBlurView = liq.pullBlurView;
-                            }
-
-                            [CATransaction commit];
-                        }
-                    }
-                } @catch (NSException *e) {}
-            }
-
-            // Smooth gradient fade mask: notifications dissolve softly as they reach the foot of the clock
+            // Smooth gradient fade mask: notifications softly fade right below the status bar (no divider under clock)
             if (scroll && root) {
                 UIView *clipHost = scroll.superview;
                 if (clipHost && !ld_isDescendant(timeView, clipHost)) {
                     @try {
-                        CGFloat clockBottomInRoot = 0.0;
-                        if (g_baseClockBottomOnScreen > 0.0 && root.window) {
-                            CGRect screenRect = CGRectMake(0.0, g_baseClockBottomOnScreen, root.bounds.size.width, 1.0);
-                            CGRect rootRect = [root convertRect:screenRect fromView:nil];
-                            clockBottomInRoot = rootRect.origin.y;
-                        } else {
-                            CGFloat b = ld_clockBottomOnScreen(timeView, container, root);
-                            if (b > 10.0 && root.window) {
-                                CGRect screenRect = CGRectMake(0.0, b + 8.0, root.bounds.size.width, 1.0);
-                                clockBottomInRoot = [root convertRect:screenRect fromView:nil].origin.y;
-                            }
-                        }
-
                         CGFloat rootW = root.bounds.size.width;
                         CGFloat rootH = root.bounds.size.height;
-                        if (clockBottomInRoot > 20.0 && clockBottomInRoot < rootH * 0.85) {
-                            CGFloat fadeHeight = 42.0;
-                            CGFloat startFadeY = clockBottomInRoot - 8.0;
-                            CGFloat maskHeight = fmax(10.0, rootH - startFadeY);
 
-                            CGRect visibleRectInRoot = CGRectMake(0.0, startFadeY, rootW, maskHeight);
-                            CGRect maskRectInHost = [clipHost convertRect:visibleRectInRoot fromView:root];
-
-                            [CATransaction begin];
-                            [CATransaction setDisableActions:YES];
-
-                            if (!g_scrollGradientMask) {
-                                g_scrollGradientMask = [CAGradientLayer layer];
-                                g_scrollGradientMask.startPoint = CGPointMake(0.5, 0.0);
-                                g_scrollGradientMask.endPoint = CGPointMake(0.5, 1.0);
-                                g_scrollGradientMask.colors = @[
-                                    (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
-                                    (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
-                                    (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor
-                                ];
-                            }
-
-                            CGFloat fadeRatio = ld_clampf((float)(fadeHeight / maskHeight), 0.01f, 0.50f);
-                            g_scrollGradientMask.locations = @[
-                                @(0.0),
-                                @(fadeRatio),
-                                @(1.0)
-                            ];
-
-                            g_scrollGradientMask.frame = maskRectInHost;
-                            if (clipHost.layer.mask != g_scrollGradientMask) {
-                                clipHost.layer.mask = g_scrollGradientMask;
-                                g_maskedView = clipHost;
-                            }
-
-                            [CATransaction commit];
+                        CGFloat statusBarH = 48.0;
+                        if (root.window && root.window.safeAreaInsets.top > 20.0) {
+                            statusBarH = root.window.safeAreaInsets.top;
                         }
+
+                        CGFloat fadeHeight = 26.0;
+                        CGFloat startFadeY = statusBarH - 2.0;
+                        CGFloat maskHeight = fmax(10.0, rootH - startFadeY);
+
+                        CGRect visibleRectInRoot = CGRectMake(0.0, startFadeY, rootW, maskHeight);
+                        CGRect maskRectInHost = [clipHost convertRect:visibleRectInRoot fromView:root];
+
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+
+                        if (!g_scrollGradientMask) {
+                            g_scrollGradientMask = [CAGradientLayer layer];
+                            g_scrollGradientMask.startPoint = CGPointMake(0.5, 0.0);
+                            g_scrollGradientMask.endPoint = CGPointMake(0.5, 1.0);
+                            g_scrollGradientMask.colors = @[
+                                (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor,
+                                (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+                                (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor
+                            ];
+                        }
+
+                        CGFloat fadeRatio = ld_clampf((float)(fadeHeight / maskHeight), 0.01f, 0.50f);
+                        g_scrollGradientMask.locations = @[
+                            @(0.0),
+                            @(fadeRatio),
+                            @(1.0)
+                        ];
+
+                        g_scrollGradientMask.frame = maskRectInHost;
+                        if (clipHost.layer.mask != g_scrollGradientMask) {
+                            clipHost.layer.mask = g_scrollGradientMask;
+                            g_maskedView = clipHost;
+                        }
+
+                        [CATransaction commit];
                     } @catch (NSException *e) {}
                 }
             }
@@ -970,17 +917,11 @@ static IMP ld_swizzle(Class cls, SEL selector, IMP replacement) {
 }
 
 typedef void (*LDViewAppearFn)(id, SEL, BOOL);
-typedef BOOL (*LDAllowsDateScrollFn)(id, SEL);
-typedef void (*LDUpdateDateAppearanceFn)(id, SEL, BOOL, CGPoint);
-typedef double (*LDClippingOffsetFn)(id, SEL);
 
 static IMP g_origCSAppear = NULL;
 static IMP g_origCSDisappear = NULL;
 static IMP g_origSBAppear = NULL;
 static IMP g_origSBDisappear = NULL;
-static IMP g_origAllowsDateScroll = NULL;
-static IMP g_origUpdateDateAppearance = NULL;
-static IMP g_origClippingOffset = NULL;
 static IMP g_origDisplayViewLayout = NULL;
 static IMP g_origSBFDateViewLayout = NULL;
 
@@ -997,38 +938,38 @@ static void ld_sbfDateView_layoutSubviews(UIView *self, SEL _cmd) {
 }
 
 static IMP g_origLGApplyReason = NULL;
-static IMP g_origLGTrackMotion = NULL;
-static IMP g_origLGTick = NULL;
+static void *kLDRestingTopKey = &kLDRestingTopKey;
 
 static void ld_lgClockState_applyReason(id self, SEL selector, NSString *reason) {
-    if (g_enabled && g_stickyClock) {
-        if ([reason isEqualToString:@"motion"]) {
-            // Override Liquid Glass: drop @"motion" to prevent it from sliding the clock off-screen!
-            return;
-        }
-    }
     if (g_origLGApplyReason) {
         ((void (*)(id, SEL, NSString *))g_origLGApplyReason)(self, selector, reason);
     }
-}
 
-static void ld_lgClockMotionTracker_trackMotion(id self, SEL selector) {
-    if (g_enabled && g_stickyClock) {
-        // Prevent Liquid Glass from starting CADisplayLink motion loop during notification scrolling
-        return;
-    }
-    if (g_origLGTrackMotion) {
-        ((void (*)(id, SEL))g_origLGTrackMotion)(self, selector);
-    }
-}
-
-static void ld_lgClockMotionTracker_tick(id self, SEL selector, CADisplayLink *link) {
-    if (g_enabled && g_stickyClock) {
-        if (link) link.paused = YES;
-        return;
-    }
-    if (g_origLGTick) {
-        ((void (*)(id, SEL, CADisplayLink *))g_origLGTick)(self, selector, link);
+    if (g_enabled) {
+        @try {
+            UIView *maskView = [self valueForKey:@"glyphMaskView"];
+            CAShapeLayer *maskLayer = [self valueForKey:@"glyphMaskLayer"];
+            if (maskView && maskLayer && maskLayer.path) {
+                CGRect pathBounds = CGPathGetPathBoundingBox(maskLayer.path);
+                if (!CGRectIsNull(pathBounds) && !CGRectIsEmpty(pathBounds)) {
+                    NSNumber *restingNum = objc_getAssociatedObject(self, kLDRestingTopKey);
+                    if (!restingNum || g_progress < 0.001f || ![reason isEqualToString:@"motion"]) {
+                        // At rest or during non-motion updates: record the baseline top coordinate of glyphs
+                        objc_setAssociatedObject(self, kLDRestingTopKey, @(pathBounds.origin.y), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                        maskView.transform = CGAffineTransformIdentity;
+                    } else {
+                        CGFloat restingTop = [restingNum doubleValue];
+                        CGFloat overflow = restingTop - pathBounds.origin.y;
+                        if (overflow > 0.5f) {
+                            // Compensate upward overflow: digits stay locked right beneath the date subtitle, never overlapping it
+                            maskView.transform = CGAffineTransformMakeTranslation(0.0, overflow);
+                        } else {
+                            maskView.transform = CGAffineTransformIdentity;
+                        }
+                    }
+                }
+            }
+        } @catch (NSException *e) {}
     }
 }
 
@@ -1037,47 +978,13 @@ static void ld_installLiquidGlassHooks(void) {
     if (s_installed) return;
 
     Class lgState = NSClassFromString(@"LGClockState");
-    Class lgTracker = NSClassFromString(@"LGClockMotionTracker");
-
-    if (lgState || lgTracker) {
+    if (lgState) {
         s_installed = YES;
-        if (lgState) {
-            g_origLGApplyReason = ld_swizzle(lgState, @selector(applyReason:),
-                                             (IMP)ld_lgClockState_applyReason);
-        }
-        if (lgTracker) {
-            g_origLGTrackMotion = ld_swizzle(lgTracker, @selector(trackMotion),
-                                             (IMP)ld_lgClockMotionTracker_trackMotion);
-            g_origLGTick = ld_swizzle(lgTracker, @selector(tick:),
-                                      (IMP)ld_lgClockMotionTracker_tick);
-        }
-        ld_log(@"Liquid Glass override installed: state=%p tracker=%p applyReason=%p trackMotion=%p tick=%p",
-               lgState, lgTracker, g_origLGApplyReason, g_origLGTrackMotion, g_origLGTick);
+        g_origLGApplyReason = ld_swizzle(lgState, @selector(applyReason:),
+                                         (IMP)ld_lgClockState_applyReason);
+        ld_log(@"Liquid Glass adaptive clock hook installed: state=%p applyReason=%p",
+               lgState, g_origLGApplyReason);
     }
-}
-
-static BOOL ld_csAllowsDateScroll(id self, SEL selector) {
-    if (g_enabled && g_stickyClock) return NO;
-    if (g_origAllowsDateScroll) return ((LDAllowsDateScrollFn)g_origAllowsDateScroll)(self, selector);
-    return YES;
-}
-
-static void ld_csUpdateDateAppearance(id self, SEL selector, BOOL hidden, CGPoint offset) {
-    if (g_enabled && g_stickyClock) {
-        offset = CGPointZero;
-        hidden = NO;
-    }
-    if (g_origUpdateDateAppearance) {
-        ((LDUpdateDateAppearanceFn)g_origUpdateDateAppearance)(self, selector, hidden, offset);
-    }
-}
-
-static double ld_csClippingOffset(id self, SEL selector) {
-    if (g_enabled && g_stickyClock && g_baseClockBottomOnScreen > 0.0) {
-        return g_baseClockBottomOnScreen;
-    }
-    if (g_origClippingOffset) return ((LDClippingOffsetFn)g_origClippingOffset)(self, selector);
-    return 0.0;
 }
 
 static void ld_csViewWillAppear(id self, SEL selector, BOOL animated) {
@@ -1127,7 +1034,6 @@ static void ld_init(void) {
 
         Class cs = NSClassFromString(@"CSCoverSheetViewController");
         Class sb = NSClassFromString(@"SBCoverSheetViewController");
-        Class combList = NSClassFromString(@"CSCombinedListViewController");
         Class promDisplay = NSClassFromString(@"CSProminentDisplayView");
         Class sbfDateView = NSClassFromString(@"SBFLockScreenDateView");
 
@@ -1143,14 +1049,6 @@ static void ld_init(void) {
             g_origSBDisappear = ld_swizzle(sb, @selector(viewDidDisappear:),
                                            (IMP)ld_sbViewDidDisappear);
         }
-        if (combList) {
-            g_origAllowsDateScroll = ld_swizzle(combList, @selector(_allowsDateViewOrProudLockScroll),
-                                                (IMP)ld_csAllowsDateScroll);
-            g_origUpdateDateAppearance = ld_swizzle(combList, @selector(updateAppearanceForHidden:offset:),
-                                                    (IMP)ld_csUpdateDateAppearance);
-            g_origClippingOffset = ld_swizzle(combList, @selector(clippingOffset),
-                                              (IMP)ld_csClippingOffset);
-        }
         if (promDisplay) {
             g_origDisplayViewLayout = ld_swizzle(promDisplay, @selector(layoutSubviews),
                                                  (IMP)ld_prominentDisplayView_layoutSubviews);
@@ -1162,11 +1060,10 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.3 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ List=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.4 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
-               combList ? NSStringFromClass(combList) : @"missing",
                promDisplay ? NSStringFromClass(promDisplay) : @"missing",
                sbfDateView ? NSStringFromClass(sbfDateView) : @"missing");
     }
