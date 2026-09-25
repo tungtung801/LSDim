@@ -49,8 +49,6 @@ static NSObject *g_displayTarget;
 
 static BOOL     g_active;
 static BOOL     g_safeMode;
-static BOOL     g_markerArmed;
-static uint64_t g_safetyGeneration;
 static BOOL     g_baselineReady;
 static CGRect   g_baseRect;
 static CGFloat  g_baseOffsetY;
