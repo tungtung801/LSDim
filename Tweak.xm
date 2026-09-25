@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.10
+ * 26LockDim 0.2.11
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -33,11 +33,14 @@ static BOOL   g_debug                = YES;
 static BOOL   g_stickyClock          = YES;
 static float  g_maxAlpha             = 0.48f;
 static BOOL   g_roundBatteryEnabled  = YES;
-static double g_batteryOutsideRadius = 4.0;
-static double g_batteryInsideRadius  = 2.4;
+static BOOL   g_noBatteryGapEnabled  = YES;
+static double g_batteryOutsideRadius = 3.6;
+static double g_batteryInsideRadius  = 2.6;
 
 static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
+static IMP g_origBatteryLineWidthAndInterspace = NULL;
+static IMP g_origBatteryLineWidthAndInterspaceClass = NULL;
 static IMP g_origBatteryLayoutSubviews = NULL;
 
 static __weak UIViewController *g_coverController;
@@ -132,6 +135,10 @@ static void ld_readSettings(void) {
     value = settings[@"batteryInsideRadius"];
     if ([value isKindOfClass:[NSNumber class]])
         g_batteryInsideRadius = [value doubleValue];
+
+    value = settings[@"noBatteryGapEnabled"];
+    if ([value isKindOfClass:[NSNumber class]])
+        g_noBatteryGapEnabled = [value boolValue];
 }
 
 static void ld_clearSafetyMarker(void) {
@@ -1040,15 +1047,23 @@ static void ld_sbViewDidDisappear(id self, SEL selector, BOOL animated) {
     ld_stopIfController(self);
 }
 
+static BOOL ld_isInsideControlCenter(UIView *view) {
+    if (!view) return NO;
+    for (UIView *v = view; v; v = v.superview) {
+        NSString *cls = NSStringFromClass(v.class);
+        if ([cls containsString:@"CCUI"] || [cls containsString:@"ControlCenter"]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
 static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
-        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
-        if ([self isKindOfClass:[UIView class]]) {
-            CGFloat h = ((UIView *)self).bounds.size.height;
-            if (h > 12.0) {
-                // Scale proportionally for Control Center expanded status bar
-                return baseOut * (h / 11.5);
-            }
+        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.6;
+        if ([self isKindOfClass:[UIView class]] && ld_isInsideControlCenter((UIView *)self)) {
+            // Scale proportionally for Control Center expanded status bar
+            return baseOut * 1.15;
         }
         return baseOut;
     }
@@ -1061,12 +1076,36 @@ static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
 static double ld_batteryInsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
         double outR = ld_batteryOutsideRadius(self, _cmd, trait);
-        return fmax(1.0, outR - 1.6);
+        double inset = (g_noBatteryGapEnabled ? 1.0 : 1.6);
+        return fmax(1.0, outR - inset);
     }
     if (g_origBatteryInsideRadius) {
         return ((double (*)(id, SEL, id))g_origBatteryInsideRadius)(self, _cmd, trait);
     }
     return 1.5;
+}
+
+static double ld_batteryLineWidthAndInterspace(id self, SEL _cmd, id trait) {
+    if (g_roundBatteryEnabled && g_noBatteryGapEnabled) {
+        if ([self isKindOfClass:[UIView class]] && ld_isInsideControlCenter((UIView *)self)) {
+            return 1.15;
+        }
+        return 1.0;
+    }
+    if (g_origBatteryLineWidthAndInterspace) {
+        return ((double (*)(id, SEL, id))g_origBatteryLineWidthAndInterspace)(self, _cmd, trait);
+    }
+    return 1.0;
+}
+
+static double ld_batteryLineWidthAndInterspaceClass(id self, SEL _cmd, long long iconSize) {
+    if (g_roundBatteryEnabled && g_noBatteryGapEnabled) {
+        return (iconSize == 2) ? 1.15 : 1.0;
+    }
+    if (g_origBatteryLineWidthAndInterspaceClass) {
+        return ((double (*)(id, SEL, long long))g_origBatteryLineWidthAndInterspaceClass)(self, _cmd, iconSize);
+    }
+    return 1.0;
 }
 
 static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
@@ -1075,10 +1114,11 @@ static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
     }
     if (g_roundBatteryEnabled) {
         @try {
-            CGFloat h = self.bounds.size.height;
-            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
-            double outR = (h > 12.0) ? (baseOut * (h / 11.5)) : baseOut;
-            double inR = fmax(1.0, outR - 1.6);
+            BOOL isCC = ld_isInsideControlCenter(self);
+            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.6;
+            double outR = isCC ? (baseOut * 1.15) : baseOut;
+            double inset = (g_noBatteryGapEnabled ? 1.0 : 1.6);
+            double inR = fmax(1.0, outR - inset);
 
             CALayer *body = [self valueForKey:@"bodyLayer"];
             if (body) {
@@ -1104,6 +1144,17 @@ static void ld_installBatteryHooksForClass(Class cls) {
         IMP orig = ld_swizzle(cls, @selector(_insideCornerRadiusForTraitCollection:),
                               (IMP)ld_batteryInsideRadius);
         if (!g_origBatteryInsideRadius) g_origBatteryInsideRadius = orig;
+    }
+    if (class_getInstanceMethod(cls, @selector(_lineWidthAndInterspaceForTraitCollection:))) {
+        IMP orig = ld_swizzle(cls, @selector(_lineWidthAndInterspaceForTraitCollection:),
+                              (IMP)ld_batteryLineWidthAndInterspace);
+        if (!g_origBatteryLineWidthAndInterspace) g_origBatteryLineWidthAndInterspace = orig;
+    }
+    if (class_getClassMethod(cls, @selector(_lineWidthAndInterspaceForIconSize:))) {
+        Class meta = object_getClass(cls);
+        IMP orig = ld_swizzle(meta, @selector(_lineWidthAndInterspaceForIconSize:),
+                              (IMP)ld_batteryLineWidthAndInterspaceClass);
+        if (!g_origBatteryLineWidthAndInterspaceClass) g_origBatteryLineWidthAndInterspaceClass = orig;
     }
     IMP origLayout = ld_swizzle(cls, @selector(layoutSubviews),
                                 (IMP)ld_batteryView_layoutSubviews);
@@ -1153,7 +1204,7 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.10 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.11 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",

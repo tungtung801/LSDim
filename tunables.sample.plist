@@ -10,10 +10,12 @@
     <real>0.48</real>
     <key>roundBatteryEnabled</key>
     <true/>
+    <key>noBatteryGapEnabled</key>
+    <true/>
     <key>batteryOutsideRadius</key>
-    <real>4.0</real>
+    <real>3.6</real>
     <key>batteryInsideRadius</key>
-    <real>2.4</real>
+    <real>2.6</real>
     <key>debug</key>
     <true/>
 </dict>
