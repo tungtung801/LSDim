@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.5
+ * 26LockDim 0.2.6
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -33,8 +33,8 @@ static BOOL   g_debug                = YES;
 static BOOL   g_stickyClock          = YES;
 static float  g_maxAlpha             = 0.48f;
 static BOOL   g_roundBatteryEnabled  = YES;
-static double g_batteryOutsideRadius = 5.0;
-static double g_batteryInsideRadius  = 3.0;
+static double g_batteryOutsideRadius = 4.0;
+static double g_batteryInsideRadius  = 2.4;
 
 static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
@@ -1042,7 +1042,7 @@ static void ld_sbViewDidDisappear(id self, SEL selector, BOOL animated) {
 
 static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
-        return (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 5.0;
+        return (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
     }
     if (g_origBatteryOutsideRadius) {
         return ((double (*)(id, SEL, id))g_origBatteryOutsideRadius)(self, _cmd, trait);
@@ -1052,7 +1052,8 @@ static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
 
 static double ld_batteryInsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
-        return (g_batteryInsideRadius > 0.0) ? g_batteryInsideRadius : 3.0;
+        double outR = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
+        return (g_batteryInsideRadius > 0.0) ? g_batteryInsideRadius : fmax(1.0, outR - 1.6);
     }
     if (g_origBatteryInsideRadius) {
         return ((double (*)(id, SEL, id))g_origBatteryInsideRadius)(self, _cmd, trait);
@@ -1073,10 +1074,9 @@ static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
             CALayer *fill = [self valueForKey:@"fillLayer"];
             if (fill) {
                 fill.cornerCurve = kCACornerCurveContinuous;
-                double r = (g_batteryInsideRadius > 0.0) ? g_batteryInsideRadius : 3.0;
-                if (fill.cornerRadius < r) {
-                    fill.cornerRadius = r;
-                }
+                double outR = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
+                double inR = (g_batteryInsideRadius > 0.0) ? g_batteryInsideRadius : fmax(1.0, outR - 1.6);
+                fill.cornerRadius = inR;
             }
         } @catch (NSException *e) {}
     }
@@ -1138,7 +1138,7 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.5 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.6 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
