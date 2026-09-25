@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.1
+ * 26LockDim 0.2.2
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -623,6 +623,12 @@ static void ld_setActive(BOOL active) {
         }
         g_scrollGradientMask = nil;
 
+        if (g_clockTimeView) {
+            @try {
+                g_clockTimeView.transform = CGAffineTransformIdentity;
+            } @catch (NSException *e) {}
+            g_clockTimeView = nil;
+        }
         if (g_clockContainerView) {
             @try {
                 g_clockContainerView.transform = CGAffineTransformIdentity;
@@ -793,8 +799,8 @@ static void ld_tick_impl(CADisplayLink *link) {
                 }
             }
 
-            // Active pull/scroll: lock the TOP of the clock rigidly in place
-            if (g_clockBaselineReady && container) {
+            // Active pull/scroll: lock the TOP of the clock digits rigidly in place under the date
+            if (g_clockBaselineReady && timeView) {
                 @try {
                     CGFloat currentTop = ld_clockTopOnScreen(timeView, container, root);
                     if (currentTop > 10.0) {
@@ -819,14 +825,14 @@ static void ld_tick_impl(CADisplayLink *link) {
                             [CATransaction begin];
                             [CATransaction setDisableActions:YES];
 
-                            container.transform = trans;
+                            timeView.transform = trans;
 
                             LDLiquidGlassContext *liq = ld_getLiquidGlassContext(container, timeView, root);
-                            if (liq.glassView && !ld_isDescendant(liq.glassView, container)) {
+                            if (liq.glassView && !ld_isDescendant(liq.glassView, timeView)) {
                                 liq.glassView.transform = trans;
                                 g_liquidGlassView = liq.glassView;
                             }
-                            if (liq.pullBlurView && !ld_isDescendant(liq.pullBlurView, container)) {
+                            if (liq.pullBlurView && !ld_isDescendant(liq.pullBlurView, timeView)) {
                                 liq.pullBlurView.transform = trans;
                                 g_liquidPullBlurView = liq.pullBlurView;
                             }
@@ -898,10 +904,11 @@ static void ld_tick_impl(CADisplayLink *link) {
                 }
             }
         }
-    } else if (g_clockContainerView && fabs(g_currentClockTranslateY) > 0.0f) {
+    } else if ((g_clockTimeView || g_clockContainerView) && fabs(g_currentClockTranslateY) > 0.0f) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
-        g_clockContainerView.transform = CGAffineTransformIdentity;
+        if (g_clockTimeView) g_clockTimeView.transform = CGAffineTransformIdentity;
+        if (g_clockContainerView) g_clockContainerView.transform = CGAffineTransformIdentity;
         if (g_liquidGlassView) g_liquidGlassView.transform = CGAffineTransformIdentity;
         if (g_liquidPullBlurView) g_liquidPullBlurView.transform = CGAffineTransformIdentity;
         g_currentClockTranslateY = 0.0f;
@@ -965,10 +972,6 @@ static IMP ld_swizzle(Class cls, SEL selector, IMP replacement) {
 typedef void (*LDViewAppearFn)(id, SEL, BOOL);
 typedef BOOL (*LDAllowsDateScrollFn)(id, SEL);
 typedef void (*LDUpdateDateAppearanceFn)(id, SEL, BOOL, CGPoint);
-typedef double (*LDTimeLabelOffsetFn)(id, SEL, double);
-typedef double (*LDTimeScrollPercentFn)(id, SEL, unsigned long long);
-typedef void (*LDSetDateOffsetFn)(id, SEL, CGPoint);
-typedef CGPoint (*LDGetDateOffsetFn)(id, SEL);
 typedef double (*LDClippingOffsetFn)(id, SEL);
 
 static IMP g_origCSAppear = NULL;
@@ -977,10 +980,6 @@ static IMP g_origSBAppear = NULL;
 static IMP g_origSBDisappear = NULL;
 static IMP g_origAllowsDateScroll = NULL;
 static IMP g_origUpdateDateAppearance = NULL;
-static IMP g_origTimeLabelOffset = NULL;
-static IMP g_origTimeScrollPercent = NULL;
-static IMP g_origSetDateOffset = NULL;
-static IMP g_origGetDateOffset = NULL;
 static IMP g_origClippingOffset = NULL;
 static IMP g_origDisplayViewLayout = NULL;
 static IMP g_origSBFDateViewLayout = NULL;
@@ -1011,41 +1010,6 @@ static void ld_csUpdateDateAppearance(id self, SEL selector, BOOL hidden, CGPoin
     if (g_origUpdateDateAppearance) {
         ((LDUpdateDateAppearanceFn)g_origUpdateDateAppearance)(self, selector, hidden, offset);
     }
-}
-
-/* Return natural resting time label offset (at percent = 0.0) instead of 0.0 */
-static double ld_csTimeLabelOffset(id self, SEL selector, double percent) {
-    if (g_enabled && g_stickyClock) {
-        if (g_origTimeLabelOffset) {
-            return ((LDTimeLabelOffsetFn)g_origTimeLabelOffset)(self, selector, 0.0);
-        }
-    }
-    if (g_origTimeLabelOffset) return ((LDTimeLabelOffsetFn)g_origTimeLabelOffset)(self, selector, percent);
-    return 0.0;
-}
-
-static double ld_csTimeScrollPercent(id self, SEL selector, unsigned long long layout) {
-    if (g_enabled && g_stickyClock) return 0.0;
-    if (g_origTimeScrollPercent) return ((LDTimeScrollPercentFn)g_origTimeScrollPercent)(self, selector, layout);
-    return 0.0;
-}
-
-static void ld_csSetDateOffset(id self, SEL selector, CGPoint offset) {
-    if (g_enabled && g_stickyClock) offset.y = 0.0;
-    if (g_origSetDateOffset) ((LDSetDateOffsetFn)g_origSetDateOffset)(self, selector, offset);
-}
-
-static CGPoint ld_csGetDateOffset(id self, SEL selector) {
-    if (g_enabled && g_stickyClock) {
-        if (g_origGetDateOffset) {
-            CGPoint pt = ((LDGetDateOffsetFn)g_origGetDateOffset)(self, selector);
-            pt.y = 0.0;
-            return pt;
-        }
-        return CGPointZero;
-    }
-    if (g_origGetDateOffset) return ((LDGetDateOffsetFn)g_origGetDateOffset)(self, selector);
-    return CGPointZero;
 }
 
 static double ld_csClippingOffset(id self, SEL selector) {
@@ -1101,7 +1065,6 @@ static void ld_init(void) {
 
         Class cs = NSClassFromString(@"CSCoverSheetViewController");
         Class sb = NSClassFromString(@"SBCoverSheetViewController");
-        Class csView = NSClassFromString(@"CSCoverSheetView");
         Class combList = NSClassFromString(@"CSCombinedListViewController");
         Class promDisplay = NSClassFromString(@"CSProminentDisplayView");
         Class sbfDateView = NSClassFromString(@"SBFLockScreenDateView");
@@ -1111,22 +1074,12 @@ static void ld_init(void) {
                                         (IMP)ld_csViewWillAppear);
             g_origCSDisappear = ld_swizzle(cs, @selector(viewDidDisappear:),
                                            (IMP)ld_csViewDidDisappear);
-            g_origTimeLabelOffset = ld_swizzle(cs, @selector(timeLabelOffsetForScrollPercent:),
-                                               (IMP)ld_csTimeLabelOffset);
-            g_origTimeScrollPercent = ld_swizzle(cs, @selector(_timeLabelScrollPercentForDateTimeLayout:),
-                                                 (IMP)ld_csTimeScrollPercent);
         }
         if (sb) {
             g_origSBAppear = ld_swizzle(sb, @selector(viewWillAppear:),
                                         (IMP)ld_sbViewWillAppear);
             g_origSBDisappear = ld_swizzle(sb, @selector(viewDidDisappear:),
                                            (IMP)ld_sbViewDidDisappear);
-        }
-        if (csView) {
-            g_origSetDateOffset = ld_swizzle(csView, @selector(setDateViewOffset:),
-                                             (IMP)ld_csSetDateOffset);
-            g_origGetDateOffset = ld_swizzle(csView, @selector(dateViewOffset),
-                                             (IMP)ld_csGetDateOffset);
         }
         if (combList) {
             g_origAllowsDateScroll = ld_swizzle(combList, @selector(_allowsDateViewOrProudLockScroll),
@@ -1145,11 +1098,10 @@ static void ld_init(void) {
                                                  (IMP)ld_sbfDateView_layoutSubviews);
         }
 
-        ld_log(@"loaded v0.2.1 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ CSView=%@ List=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.2 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ List=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
-               csView ? NSStringFromClass(csView) : @"missing",
                combList ? NSStringFromClass(combList) : @"missing",
                promDisplay ? NSStringFromClass(promDisplay) : @"missing",
                sbfDateView ? NSStringFromClass(sbfDateView) : @"missing");
