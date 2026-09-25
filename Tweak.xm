@@ -1,17 +1,17 @@
 /*
- * 26LockDim 0.2.0
+ * 26LockDim 0.2.1
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
  * Seamless integration with dynamic clock tweaks including liquidglass / liquidass.
  *
- * v0.2.0 changes:
- * - LiquidAss obstacle retraction suppression: hooks [LGClockState applyReason:]
- *   and intercepts [NSHashTable allObjects] to prevent liquidass from shifting/jittering
- *   clock glyphs or compressing variable font axes during notification scrolling.
- * - Dynamic dimming trigger: calculates physical gap to on-screen clock foot,
- *   activating dimming gradually from the very first swipe pixel and reaching 100%
- *   full dimming exactly when notifications reach the bottom of the clock.
+ * v0.2.1 changes:
+ * - Top-anchored sticky clock: locks the TOP edge of the clock view rigidly at resting
+ *   position on screen, completely invariant to internal font height scaling below.
+ * - Removed transform modification from layoutSubviews, eliminating 120Hz infinite layout loops.
+ * - Restored and perfected dimming: calibrated to 150pt travel with direct linear ramp and
+ *   exponential decay smoothing (no deadzone, activates immediately from first pixel).
+ * - Removed aggressive safety marker lockout and dangerous NSHashTable/dyld hooks.
  */
 
 #import <UIKit/UIKit.h>
@@ -19,7 +19,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
-#import <mach-o/dyld.h>
 #import <math.h>
 #import <stdio.h>
 #import <stdlib.h>
@@ -119,45 +118,18 @@ static void ld_readSettings(void) {
 }
 
 static void ld_clearSafetyMarker(void) {
-    g_safetyGeneration++;
-    g_markerArmed = NO;
     [[NSFileManager defaultManager] removeItemAtPath:LD_SAFEFILE error:NULL];
+    g_safeMode = NO;
 }
 
 static void ld_armSafetyWindow(NSString *reason) {
-    if (g_safeMode) return;
-
-    g_safetyGeneration++;
-    g_markerArmed = YES;
-    NSDictionary *marker = @{
-        @"reason": reason ?: @"unknown",
-        @"time": @([[NSDate date] timeIntervalSince1970])
-    };
-    [marker writeToFile:LD_SAFEFILE atomically:YES];
-
-    uint64_t gen = g_safetyGeneration;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        if (g_markerArmed && g_safetyGeneration == gen) {
-            ld_clearSafetyMarker();
-            ld_log(@"safety window cleared (%@)", reason);
-        }
-    });
+    // Disabled to prevent false-positive lockouts
 }
 
 static void ld_checkSafetyMarker(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if ([fm fileExistsAtPath:LD_SAFEFILE]) {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:LD_SAFEFILE error:NULL];
-        NSDate *mdate = attrs ? [attrs fileModificationDate] : nil;
-        NSTimeInterval age = mdate ? [[NSDate date] timeIntervalSinceDate:mdate] : 9999.0;
-        if (age < 120.0) {
-            g_safeMode = YES;
-            NSLog(@"[26LockDim] *** SAFE MODE: marker present (age=%.1fs). Disabling. ***", age);
-        } else {
-            [fm removeItemAtPath:LD_SAFEFILE error:NULL];
-        }
-    }
+    // Automatically clear any stale safety marker left from prior versions
+    [[NSFileManager defaultManager] removeItemAtPath:LD_SAFEFILE error:NULL];
+    g_safeMode = NO;
 }
 
 static NSString *ld_className(id object) {
@@ -343,13 +315,43 @@ static CGRect ld_clockScreenRect(UIView *timeView, UIView *container, UIView *ro
 }
 
 static CGFloat ld_clockTopOnScreen(UIView *timeView, UIView *container, UIView *root) {
-    CGRect r = ld_clockScreenRect(timeView, container, root);
-    return r.origin.y;
+    if (timeView && timeView.window) {
+        @try {
+            CGRect sRect = [timeView convertRect:timeView.bounds toView:nil];
+            if (sRect.origin.y > 10.0) return sRect.origin.y;
+        } @catch (NSException *e) {}
+    }
+    if (container && container.window) {
+        @try {
+            CGRect sRect = [container convertRect:container.bounds toView:nil];
+            if (sRect.origin.y > 10.0) return sRect.origin.y;
+        } @catch (NSException *e) {}
+    }
+    LDLiquidGlassContext *liq = ld_getLiquidGlassContext(container, timeView, root);
+    UIView *active = liq.activeView;
+    if (active && active.window) {
+        @try {
+            CGRect sRect = [active convertRect:active.bounds toView:nil];
+            if (sRect.origin.y > 10.0) return sRect.origin.y;
+        } @catch (NSException *e) {}
+    }
+    return 0.0;
 }
 
 static CGFloat ld_clockBottomOnScreen(UIView *timeView, UIView *container, UIView *root) {
-    CGRect r = ld_clockScreenRect(timeView, container, root);
-    return CGRectGetMaxY(r);
+    if (timeView && timeView.window) {
+        @try {
+            CGRect sRect = [timeView convertRect:timeView.bounds toView:nil];
+            if (sRect.origin.y > 10.0) return CGRectGetMaxY(sRect);
+        } @catch (NSException *e) {}
+    }
+    if (container && container.window) {
+        @try {
+            CGRect sRect = [container convertRect:container.bounds toView:nil];
+            if (sRect.origin.y > 10.0) return CGRectGetMaxY(sRect);
+        } @catch (NSException *e) {}
+    }
+    return 0.0;
 }
 
 /* Find both timeView and its containerView reliably across iOS 15 & 16 */
@@ -441,23 +443,28 @@ static UIScrollView *ld_notificationScrollForRoot(UIView *root) {
     return best;
 }
 
-static BOOL ld_scrollHasNotifications(UIScrollView *scroll) {
-    if (!scroll) return NO;
-
-    if (scroll.contentSize.height > scroll.bounds.size.height + 8.0)
-        return YES;
-
-    for (UIView *sub in scroll.subviews) {
+static BOOL ld_hasNotificationSubviews(UIView *view, int depth) {
+    if (!view || depth > 3) return NO;
+    for (UIView *sub in view.subviews) {
         NSString *name = [ld_className(sub) lowercaseString];
         if ([name containsString:@"notification"] ||
             [name containsString:@"cell"] ||
             [name containsString:@"stack"] ||
-            [name containsString:@"list"]) {
-            if (sub.bounds.size.width > 120.0 && sub.bounds.size.height > 30.0)
+            [name containsString:@"list"] ||
+            [name containsString:@"bulletin"]) {
+            if (sub.bounds.size.width > 90.0 && sub.bounds.size.height > 20.0)
                 return YES;
         }
+        if (ld_hasNotificationSubviews(sub, depth + 1)) return YES;
     }
     return NO;
+}
+
+static BOOL ld_scrollHasNotifications(UIScrollView *scroll) {
+    if (!scroll) return NO;
+    if (scroll.contentSize.height > scroll.bounds.size.height + 8.0)
+        return YES;
+    return ld_hasNotificationSubviews(scroll, 0);
 }
 
 static void ld_captureBaseline(UIScrollView *scroll, UIView *root) {
@@ -542,7 +549,7 @@ static void ld_attachOverlay(UIView *root, UIScrollView *scroll) {
     }
 }
 
-static void ld_scanPanTravel(UIView *view, UIView *root, CGFloat *outMaxTravel, int depth) {
+static void ld_scanPanProgress(UIView *view, UIView *root, CGFloat *outMax, int depth) {
     if (!view || depth > 10) return;
 
     for (UIGestureRecognizer *gr in view.gestureRecognizers) {
@@ -559,13 +566,13 @@ static void ld_scanPanTravel(UIView *view, UIView *root, CGFloat *outMaxTravel, 
         }
 
         if (trans.y < -0.5) {
-            CGFloat travel = (CGFloat)(-trans.y);
-            if (travel > *outMaxTravel) *outMaxTravel = travel;
+            CGFloat panProgress = ld_clampf((float)(-trans.y / 150.0), 0.0f, 1.0f);
+            if (panProgress > *outMax) *outMax = panProgress;
         }
     }
 
     for (UIView *sub in view.subviews)
-        ld_scanPanTravel(sub, root, outMaxTravel, depth + 1);
+        ld_scanPanProgress(sub, root, outMax, depth + 1);
 }
 
 static CGFloat ld_progressForScroll(UIScrollView *scroll, UIView *root) {
@@ -584,42 +591,26 @@ static CGFloat ld_progressForScroll(UIScrollView *scroll, UIView *root) {
         currentRect = scroll.frame;
     }
 
-    // Determine on-screen clock bottom in root coordinates
-    CGFloat clockBottomInRoot = 0.0;
-    if (g_baseClockBottomOnScreen > 10.0 && root.window) {
-        CGRect screenRect = CGRectMake(0.0, g_baseClockBottomOnScreen, root.bounds.size.width, 1.0);
-        @try {
-            clockBottomInRoot = [root convertRect:screenRect fromView:nil].origin.y;
-        } @catch (NSException *e) {
-            clockBottomInRoot = g_baseClockBottomOnScreen;
-        }
-    } else {
-        clockBottomInRoot = root.bounds.size.height * 0.25;
-    }
+    // 150pt travel distance matches the natural physical gap from resting notifications to clock foot
+    CGFloat travelDistance = 150.0f;
 
-    // Dynamic initial physical gap between resting notification top and clock bottom
-    CGFloat initialGap = g_baseRect.origin.y - clockBottomInRoot;
-    if (initialGap < 40.0) {
-        initialGap = fmax(60.0, root.bounds.size.height * 0.30);
-    }
+    // 1. Upward frame movement
+    CGFloat upwardMove = fmax(0.0, g_baseRect.origin.y - currentRect.origin.y);
+    CGFloat pFrame = upwardMove > 0.5
+        ? ld_clampf((float)(upwardMove / travelDistance), 0.0f, 1.0f)
+        : 0.0f;
 
-    // 1. Upward travel from scroll frame movement (e.g. CoverSheet reveal / pulling list up)
-    CGFloat frameTravel = fmax(0.0, g_baseRect.origin.y - currentRect.origin.y);
+    // 2. Upward scroll content offset
+    CGFloat offsetDelta = fabs(scroll.contentOffset.y - g_baseOffsetY);
+    CGFloat pOffset = offsetDelta > 0.5
+        ? ld_clampf((float)(offsetDelta / travelDistance), 0.0f, 1.0f)
+        : 0.0f;
 
-    // 2. Upward travel from scroll contentOffset
-    CGFloat offsetTravel = fmax(0.0, scroll.contentOffset.y - g_baseOffsetY);
+    // 3. Pan gesture drag
+    CGFloat pPan = 0.0f;
+    ld_scanPanProgress(root, root, &pPan, 0);
 
-    // 3. Upward travel from active pan gesture drag
-    CGFloat panTravel = 0.0;
-    ld_scanPanTravel(root, root, &panTravel, 0);
-
-    // Combine to get total upward travel toward clock foot
-    CGFloat totalTravel = fmax(frameTravel, fmax(offsetTravel, panTravel));
-
-    // Progress starts immediately from first pixel of travel, reaching 1.0 (100%) exactly at clock foot
-    CGFloat progress = ld_clampf((float)(totalTravel / initialGap), 0.0f, 1.0f);
-
-    return progress;
+    return fmaxf(pFrame, fmaxf(pOffset, pPan));
 }
 
 static void ld_setActive(BOOL active) {
@@ -692,12 +683,9 @@ static void ld_tick_impl(CADisplayLink *link);
 }
 @end
 
-static void ld_installLiquidAssHooks(void);
-
 static void ld_start(UIViewController *controller) {
     ld_readSettings();
     if (g_safeMode || !g_enabled) return;
-    ld_installLiquidAssHooks();
 
     ld_armSafetyWindow(@"cover");
     g_coverController = controller;
@@ -778,7 +766,7 @@ static void ld_tick_impl(CADisplayLink *link) {
         g_overlay.alpha = g_alpha;
     }
 
-    // Hardware-Accurate Sticky Anchoring for Lock Screen Clock
+    // Hardware-Accurate Sticky Anchoring for Lock Screen Clock (TOP-ANCHORED)
     if (g_stickyClock) {
         UIView *container = g_clockContainerView;
         UIView *timeView = g_clockTimeView;
@@ -789,14 +777,13 @@ static void ld_tick_impl(CADisplayLink *link) {
         }
 
         if (timeView && timeView.window) {
-            // Idle state: capture resting baseline ONCE
+            // Idle state: capture resting top baseline ONCE
             if (!g_clockBaselineReady) {
-                CGRect r = ld_clockScreenRect(timeView, container, root);
-                CGFloat top = r.origin.y;
-                CGFloat bottom = CGRectGetMaxY(r);
-                if (top > 10.0 && bottom > top) {
+                CGFloat top = ld_clockTopOnScreen(timeView, container, root);
+                CGFloat bottom = ld_clockBottomOnScreen(timeView, container, root);
+                if (top > 10.0) {
                     g_baseClockTopOnScreen = top;
-                    g_baseClockBottomOnScreen = bottom + 8.0;
+                    g_baseClockBottomOnScreen = (bottom > top) ? bottom + 8.0 : top + 90.0;
                     g_clockBaselineReady = YES;
                     g_currentClockTranslateY = 0.0f;
                     [CATransaction begin];
@@ -808,12 +795,48 @@ static void ld_tick_impl(CADisplayLink *link) {
                 }
             }
 
-            // Ensure container remains cleanly at resting baseline without jittery feedback
-            if (container && !CGAffineTransformIsIdentity(container.transform)) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                container.transform = CGAffineTransformIdentity;
-                [CATransaction commit];
+            // Active pull/scroll: lock the TOP of the clock rigidly in place
+            if (g_clockBaselineReady && container) {
+                @try {
+                    CGFloat currentTop = ld_clockTopOnScreen(timeView, container, root);
+                    if (currentTop > 10.0) {
+                        CGFloat naturalTop = currentTop - g_currentClockTranslateY;
+                        CGFloat targetTranslateY = g_baseClockTopOnScreen - naturalTop;
+
+                        if (targetTranslateY < 0.0f) targetTranslateY = 0.0f;
+
+                        if (g_progress < 0.001f && targetTranslateY < 0.5f) {
+                            targetTranslateY = 0.0f;
+                        }
+
+                        CGFloat diff = targetTranslateY - g_currentClockTranslateY;
+                        if (fabs(diff) > 0.05f) {
+                            g_currentClockTranslateY += diff * (1.0f - expf((float)(-dt / 0.035f)));
+                            if (fabs(g_currentClockTranslateY) < 0.05f) g_currentClockTranslateY = 0.0f;
+
+                            CGAffineTransform trans = (g_currentClockTranslateY > 0.05f)
+                                ? CGAffineTransformMakeTranslation(0.0, g_currentClockTranslateY)
+                                : CGAffineTransformIdentity;
+
+                            [CATransaction begin];
+                            [CATransaction setDisableActions:YES];
+
+                            container.transform = trans;
+
+                            LDLiquidGlassContext *liq = ld_getLiquidGlassContext(container, timeView, root);
+                            if (liq.glassView && !ld_isDescendant(liq.glassView, container)) {
+                                liq.glassView.transform = trans;
+                                g_liquidGlassView = liq.glassView;
+                            }
+                            if (liq.pullBlurView && !ld_isDescendant(liq.pullBlurView, container)) {
+                                liq.pullBlurView.transform = trans;
+                                g_liquidPullBlurView = liq.pullBlurView;
+                            }
+
+                            [CATransaction commit];
+                        }
+                    }
+                } @catch (NSException *e) {}
             }
 
             // Smooth gradient fade mask: notifications dissolve softly as they reach the foot of the clock
@@ -968,101 +991,12 @@ static void ld_prominentDisplayView_layoutSubviews(UIView *self, SEL _cmd) {
     if (g_origDisplayViewLayout) {
         ((void (*)(id, SEL))g_origDisplayViewLayout)(self, _cmd);
     }
-    if (g_enabled && g_stickyClock) {
-        if (!CGAffineTransformIsIdentity(self.transform)) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            self.transform = CGAffineTransformIdentity;
-            [CATransaction commit];
-        }
-    }
 }
 
 static void ld_sbfDateView_layoutSubviews(UIView *self, SEL _cmd) {
     if (g_origSBFDateViewLayout) {
         ((void (*)(id, SEL))g_origSBFDateViewLayout)(self, _cmd);
     }
-    if (g_enabled && g_stickyClock) {
-        if (!CGAffineTransformIsIdentity(self.transform)) {
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            self.transform = CGAffineTransformIdentity;
-            [CATransaction commit];
-        }
-    }
-}
-
-/* LiquidAss obstacle suppression: intercept applyReason: and return empty obstacles */
-typedef void (*LDApplyReasonFn)(id, SEL, NSString *);
-typedef NSArray *(*LDAllObjectsFn)(id, SEL);
-
-static IMP g_origClockApplyReason = NULL;
-static IMP g_origHashTableAllObjects = NULL;
-static __thread BOOL g_inClockApplyReason = NO;
-
-static void ld_clockState_applyReason(id self, SEL selector, NSString *reason) {
-    if (g_enabled && g_stickyClock) {
-        g_inClockApplyReason = YES;
-        if (g_origClockApplyReason) {
-            ((LDApplyReasonFn)g_origClockApplyReason)(self, selector, reason);
-        }
-        g_inClockApplyReason = NO;
-
-        @try {
-            [self setValue:nil forKey:@"lastNearestObstacle"];
-            [self setValue:@"idle" forKey:@"lastRetractionPhase"];
-        } @catch (NSException *e) {}
-
-        return;
-    }
-    if (g_origClockApplyReason) {
-        ((LDApplyReasonFn)g_origClockApplyReason)(self, selector, reason);
-    }
-}
-
-static NSArray *ld_hashTable_allObjects(id self, SEL selector) {
-    if (g_inClockApplyReason && g_enabled && g_stickyClock) {
-        return @[];
-    }
-    if (g_origHashTableAllObjects) {
-        return ((LDAllObjectsFn)g_origHashTableAllObjects)(self, selector);
-    }
-    return @[];
-}
-
-static void ld_installLiquidAssHooks(void) {
-    static BOOL s_installed = NO;
-    if (s_installed) return;
-
-    Class clockStateCls = NSClassFromString(@"LGClockState");
-    if (!clockStateCls) return;
-
-    g_origClockApplyReason = ld_swizzle(clockStateCls, @selector(applyReason:),
-                                        (IMP)ld_clockState_applyReason);
-
-    Class htCls = NSClassFromString(@"NSHashTable");
-    if (htCls) {
-        g_origHashTableAllObjects = ld_swizzle(htCls, @selector(allObjects),
-                                               (IMP)ld_hashTable_allObjects);
-    }
-    Class concCls = NSClassFromString(@"NSConcreteHashTable");
-    if (concCls) {
-        ld_swizzle(concCls, @selector(allObjects), (IMP)ld_hashTable_allObjects);
-    }
-    @try {
-        NSHashTable *sample = [NSHashTable weakObjectsHashTable];
-        Class sampleCls = [sample class];
-        if (sampleCls && sampleCls != htCls && sampleCls != concCls) {
-            ld_swizzle(sampleCls, @selector(allObjects), (IMP)ld_hashTable_allObjects);
-        }
-    } @catch (NSException *e) {}
-
-    s_installed = YES;
-    ld_log(@"LiquidAss LGClockState successfully hooked for sticky clock");
-}
-
-static void ld_imageLoadedCallback(const struct mach_header *mh, intptr_t vmaddr_slide) {
-    ld_installLiquidAssHooks();
 }
 
 static BOOL ld_csAllowsDateScroll(id self, SEL selector) {
@@ -1213,12 +1147,7 @@ static void ld_init(void) {
                                                  (IMP)ld_sbfDateView_layoutSubviews);
         }
 
-        ld_installLiquidAssHooks();
-        if (!NSClassFromString(@"LGClockState")) {
-            _dyld_register_func_for_add_image(ld_imageLoadedCallback);
-        }
-
-        ld_log(@"loaded v0.2.0 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ CSView=%@ List=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.1 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ CSView=%@ List=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
