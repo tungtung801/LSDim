@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.9
+ * 26LockDim 0.2.10
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -33,8 +33,8 @@ static BOOL   g_debug                = YES;
 static BOOL   g_stickyClock          = YES;
 static float  g_maxAlpha             = 0.48f;
 static BOOL   g_roundBatteryEnabled  = YES;
-static double g_batteryOutsideRadius = 4.1;
-static double g_batteryInsideRadius  = 2.5;
+static double g_batteryOutsideRadius = 4.0;
+static double g_batteryInsideRadius  = 2.4;
 
 static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
@@ -1042,7 +1042,7 @@ static void ld_sbViewDidDisappear(id self, SEL selector, BOOL animated) {
 
 static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
-        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.1;
+        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
         if ([self isKindOfClass:[UIView class]]) {
             CGFloat h = ((UIView *)self).bounds.size.height;
             if (h > 12.0) {
@@ -1076,7 +1076,7 @@ static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
     if (g_roundBatteryEnabled) {
         @try {
             CGFloat h = self.bounds.size.height;
-            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.1;
+            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 4.0;
             double outR = (h > 12.0) ? (baseOut * (h / 11.5)) : baseOut;
             double inR = fmax(1.0, outR - 1.6);
 
@@ -1153,7 +1153,7 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.9 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.10 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
