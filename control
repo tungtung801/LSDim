@@ -1,6 +1,6 @@
 Package: com.tungtung801.26lockdim
 Name: 26LockDim
-Version: 0.2.13
+Version: 0.2.14
 Architecture: iphoneos-arm64
 Description: Lock Screen notification background dimming and rounded battery icon
 Maintainer: tungtung801

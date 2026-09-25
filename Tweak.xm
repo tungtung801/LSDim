@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.13
+ * 26LockDim 0.2.14
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -34,13 +34,14 @@ static BOOL   g_stickyClock          = YES;
 static float  g_maxAlpha             = 0.48f;
 static BOOL   g_roundBatteryEnabled  = YES;
 static BOOL   g_noBatteryGapEnabled  = YES;
-static double g_batteryOutsideRadius = 3.2;
-static double g_batteryInsideRadius  = 2.2;
+static double g_batteryOutsideRadius = 3.4;
+static double g_batteryInsideRadius  = 2.4;
 
 static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
 static IMP g_origBatteryLineWidthAndInterspace = NULL;
 static IMP g_origBatteryLineWidthAndInterspaceClass = NULL;
+static IMP g_origBatteryUpdateFillLayer = NULL;
 static IMP g_origBatteryLayoutSubviews = NULL;
 
 static __weak UIViewController *g_coverController;
@@ -1060,7 +1061,7 @@ static BOOL ld_isInsideControlCenter(UIView *view) {
 
 static double ld_batteryOutsideRadius(id self, SEL _cmd, id trait) {
     if (g_roundBatteryEnabled) {
-        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.2;
+        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.4;
         if ([self isKindOfClass:[UIView class]] && ld_isInsideControlCenter((UIView *)self)) {
             // Scale proportionally for Control Center expanded status bar
             return baseOut * 1.15;
@@ -1108,29 +1109,93 @@ static double ld_batteryLineWidthAndInterspaceClass(id self, SEL _cmd, long long
     return 1.0;
 }
 
+static void ld_batteryView_applyNoGap(UIView *self) {
+    if (!g_roundBatteryEnabled) return;
+    @try {
+        BOOL isCC = ld_isInsideControlCenter(self);
+        double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.4;
+        double outR = isCC ? (baseOut * 1.15) : baseOut;
+        double strokeW = 1.0;
+        double inset = (g_noBatteryGapEnabled ? strokeW : 1.6);
+        double inR = fmax(1.0, outR - inset);
+
+        CALayer *body = nil;
+        @try { body = [self valueForKey:@"bodyLayer"]; } @catch (NSException *ex) {}
+        if (!body) {
+            Ivar iv = class_getInstanceVariable(self.class, "_bodyLayer");
+            if (iv) body = object_getIvar(self, iv);
+        }
+        if (body) {
+            body.cornerCurve = kCACornerCurveContinuous;
+        }
+
+        CALayer *fill = nil;
+        @try { fill = [self valueForKey:@"fillLayer"]; } @catch (NSException *ex) {}
+        if (!fill) {
+            Ivar iv = class_getInstanceVariable(self.class, "_fillLayer");
+            if (iv) fill = object_getIvar(self, iv);
+        }
+        if (fill) {
+            fill.cornerCurve = kCACornerCurveContinuous;
+            fill.cornerRadius = inR;
+
+            if (g_noBatteryGapEnabled) {
+                BOOL showsPercent = NO;
+                @try {
+                    showsPercent = [[self valueForKey:@"showsPercentage"] boolValue];
+                } @catch (NSException *ex) {}
+
+                if (!showsPercent) {
+                    CGRect bodyFrame = (body && body.frame.size.width > 0) ? body.frame : CGRectZero;
+                    if (bodyFrame.size.width <= 0.0 || bodyFrame.size.height <= 0.0) {
+                        bodyFrame = CGRectMake(0, 0, self.bounds.size.width - 2.5, self.bounds.size.height);
+                    }
+
+                    double charge = 1.0;
+                    @try {
+                        charge = [[self valueForKey:@"chargePercent"] doubleValue];
+                    } @catch (NSException *ex) {}
+                    if (charge <= 0.0) {
+                        Ivar iv = class_getInstanceVariable(self.class, "_chargePercent");
+                        if (iv) {
+                            ptrdiff_t offset = ivar_getOffset(iv);
+                            charge = *(double *)((char *)(__bridge void *)self + offset);
+                        }
+                    }
+                    if (charge < 0.0) charge = 0.0;
+                    if (charge > 1.0) charge = 1.0;
+
+                    CGFloat availW = fmax(0.0, bodyFrame.size.width - (strokeW * 2.0));
+                    CGFloat availH = fmax(0.0, bodyFrame.size.height - (strokeW * 2.0));
+                    CGFloat fillW = availW * (CGFloat)charge;
+
+                    CGRect noGapFrame = CGRectMake(bodyFrame.origin.x + strokeW,
+                                                   bodyFrame.origin.y + strokeW,
+                                                   fillW,
+                                                   availH);
+
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    fill.frame = noGapFrame;
+                    [CATransaction commit];
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+}
+
+static void ld_batteryView_updateFillLayer(UIView *self, SEL _cmd) {
+    if (g_origBatteryUpdateFillLayer) {
+        ((void (*)(id, SEL))g_origBatteryUpdateFillLayer)(self, _cmd);
+    }
+    ld_batteryView_applyNoGap(self);
+}
+
 static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
     if (g_origBatteryLayoutSubviews) {
         ((void (*)(id, SEL))g_origBatteryLayoutSubviews)(self, _cmd);
     }
-    if (g_roundBatteryEnabled) {
-        @try {
-            BOOL isCC = ld_isInsideControlCenter(self);
-            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.2;
-            double outR = isCC ? (baseOut * 1.15) : baseOut;
-            double inset = (g_noBatteryGapEnabled ? 1.0 : 1.6);
-            double inR = fmax(1.0, outR - inset);
-
-            CALayer *body = [self valueForKey:@"bodyLayer"];
-            if (body) {
-                body.cornerCurve = kCACornerCurveContinuous;
-            }
-            CALayer *fill = [self valueForKey:@"fillLayer"];
-            if (fill) {
-                fill.cornerCurve = kCACornerCurveContinuous;
-                fill.cornerRadius = inR;
-            }
-        } @catch (NSException *e) {}
-    }
+    ld_batteryView_applyNoGap(self);
 }
 
 static void ld_installBatteryHooksForClass(Class cls) {
@@ -1155,6 +1220,11 @@ static void ld_installBatteryHooksForClass(Class cls) {
         IMP orig = ld_swizzle(meta, @selector(_lineWidthAndInterspaceForIconSize:),
                               (IMP)ld_batteryLineWidthAndInterspaceClass);
         if (!g_origBatteryLineWidthAndInterspaceClass) g_origBatteryLineWidthAndInterspaceClass = orig;
+    }
+    if (class_getInstanceMethod(cls, @selector(_updateFillLayer))) {
+        IMP orig = ld_swizzle(cls, @selector(_updateFillLayer),
+                              (IMP)ld_batteryView_updateFillLayer);
+        if (!g_origBatteryUpdateFillLayer) g_origBatteryUpdateFillLayer = orig;
     }
     IMP origLayout = ld_swizzle(cls, @selector(layoutSubviews),
                                 (IMP)ld_batteryView_layoutSubviews);
@@ -1204,7 +1274,7 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.13 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.14 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
