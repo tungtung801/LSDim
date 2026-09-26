@@ -1,5 +1,5 @@
 /*
- * 26LockDim 0.2.15
+ * 26LockDim 0.2.17
  *
  * Lock Screen notification background dimming with hardware-accurate sticky clock.
  * Compatible with iOS 15 - 16.5+, RootHide / rootless jailbreaks.
@@ -41,9 +41,6 @@ static IMP g_origBatteryOutsideRadius = NULL;
 static IMP g_origBatteryInsideRadius  = NULL;
 static IMP g_origBatteryLineWidthAndInterspace = NULL;
 static IMP g_origBatteryLineWidthAndInterspaceClass = NULL;
-static IMP g_origBatteryShowsPercentage = NULL;
-static IMP g_origBatteryCurrentlyShowsPercentage = NULL;
-static IMP g_origBatteryUpdatePercentage = NULL;
 static IMP g_origBatteryLayoutSubviews = NULL;
 
 static __weak UIViewController *g_coverController;
@@ -1053,7 +1050,7 @@ static void ld_sbViewDidDisappear(id self, SEL selector, BOOL animated) {
 static BOOL ld_isInsideControlCenter(UIView *view) {
     if (!view || ![view isKindOfClass:[UIView class]]) return NO;
     int depth = 0;
-    for (UIView *v = view; v && depth < 20; v = v.superview, depth++) {
+    for (UIView *v = view; v && depth < 15; v = v.superview, depth++) {
         NSString *cls = NSStringFromClass(v.class);
         if ([cls containsString:@"CCUI"] || [cls containsString:@"ControlCenter"]) {
             return YES;
@@ -1111,40 +1108,138 @@ static double ld_batteryLineWidthAndInterspaceClass(id self, SEL _cmd, long long
     return 1.0;
 }
 
-static bool ld_batteryShowsPercentage(id self, SEL _cmd) {
-    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
-        return YES;
-    }
-    if (g_origBatteryShowsPercentage) {
-        return ((bool (*)(id, SEL))g_origBatteryShowsPercentage)(self, _cmd);
-    }
-    return YES;
-}
+static void ld_applyBatteryStyle(UIView *self) {
+    if (!g_roundBatteryEnabled || !self) return;
 
-static bool ld_batteryCurrentlyShowsPercentage(id self, SEL _cmd) {
-    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
-        return YES;
-    }
-    if (g_origBatteryCurrentlyShowsPercentage) {
-        return ((bool (*)(id, SEL))g_origBatteryCurrentlyShowsPercentage)(self, _cmd);
-    }
-    return YES;
-}
+    // Check if user has turned ON % in iOS Settings
+    BOOL showsPercent = NO;
+    @try {
+        showsPercent = [[self valueForKey:@"showsPercentage"] boolValue];
+    } @catch (NSException *ex) {}
 
-static void ld_batteryView_updatePercentage(UIView *self, SEL _cmd) {
-    if (g_origBatteryUpdatePercentage) {
-        ((void (*)(id, SEL))g_origBatteryUpdatePercentage)(self, _cmd);
+    // When % is ON in Settings, retain Apple stock percentage display unmodified!
+    if (showsPercent) {
+        return;
     }
-    if (g_roundBatteryEnabled && g_ios27BatteryStyleEnabled) {
-        @try {
-            UILabel *lbl = [self valueForKey:@"percentageLabel"];
-            if (lbl) {
-                lbl.hidden = YES;
-                lbl.alpha = 0.0;
-                lbl.text = @"";
-            }
-        } @catch (NSException *e) {}
+
+    // When % is OFF in Settings: apply iOS 27 unified battery style!
+    BOOL isCC = ld_isInsideControlCenter(self);
+    double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.8;
+    double outR = isCC ? (baseOut * 1.15) : baseOut;
+    double inR = fmax(1.0, outR - 1.0);
+
+    CALayer *body = nil;
+    @try { body = [self valueForKey:@"bodyLayer"]; } @catch (NSException *ex) {}
+    if (!body) {
+        Ivar iv = class_getInstanceVariable(self.class, "_bodyLayer");
+        if (iv) body = object_getIvar(self, iv);
     }
+
+    CALayer *fill = nil;
+    @try { fill = [self valueForKey:@"fillLayer"]; } @catch (NSException *ex) {}
+    if (!fill) {
+        Ivar iv = class_getInstanceVariable(self.class, "_fillLayer");
+        if (iv) fill = object_getIvar(self, iv);
+    }
+
+    if (!body || !fill) return;
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
+    // 1. Continuous squircle curvature
+    body.cornerCurve = kCACornerCurveContinuous;
+    fill.cornerCurve = kCACornerCurveContinuous;
+    fill.cornerRadius = inR;
+
+    // 2. Hide percentage label if any exists
+    UILabel *lbl = nil;
+    @try { lbl = [self valueForKey:@"percentageLabel"]; } @catch (NSException *ex) {}
+    if (lbl) {
+        lbl.hidden = YES;
+        lbl.alpha = 0.0;
+        lbl.text = @"";
+    }
+
+    // 3. Resolve active fill color
+    CGColorRef fillCG = fill.backgroundColor;
+    UIColor *fillCol = fillCG ? [UIColor colorWithCGColor:fillCG] : nil;
+    if (!fillCol) {
+        @try { fillCol = [self valueForKey:@"fillColor"]; } @catch (NSException *ex) {}
+    }
+    if (!fillCol) {
+        fillCol = [UIColor whiteColor];
+    }
+
+    // 4. iOS 27 style: Translucent depleted track + subtle unified shell
+    if ([body isKindOfClass:[CAShapeLayer class]]) {
+        CAShapeLayer *sBody = (CAShapeLayer *)body;
+        sBody.fillColor = [fillCol colorWithAlphaComponent:0.22].CGColor;
+        sBody.strokeColor = [fillCol colorWithAlphaComponent:0.35].CGColor;
+        sBody.lineWidth = 0.8;
+    } else {
+        body.backgroundColor = [fillCol colorWithAlphaComponent:0.22].CGColor;
+    }
+
+    // 5. Active fill layer geometry (zero gap, fills up to chargePercent)
+    CGRect bodyFrame = body.frame;
+    if (bodyFrame.size.width <= 0.0 || bodyFrame.size.height <= 0.0) {
+        bodyFrame = CGRectMake(0, 0, self.bounds.size.width - 2.5, self.bounds.size.height);
+    }
+
+    double charge = 1.0;
+    @try {
+        charge = [[self valueForKey:@"chargePercent"] doubleValue];
+    } @catch (NSException *ex) {}
+    if (charge <= 0.0) {
+        Ivar iv = class_getInstanceVariable(self.class, "_chargePercent");
+        if (iv) {
+            ptrdiff_t offset = ivar_getOffset(iv);
+            charge = *(double *)((char *)(__bridge void *)self + offset);
+        }
+    }
+    if (charge < 0.0) charge = 0.0;
+    if (charge > 1.0) charge = 1.0;
+
+    CGFloat strokeOffset = 0.8;
+    CGFloat availW = fmax(0.0, bodyFrame.size.width - (strokeOffset * 2.0));
+    CGFloat availH = fmax(0.0, bodyFrame.size.height - (strokeOffset * 2.0));
+    CGFloat fillW = availW * (CGFloat)charge;
+
+    fill.frame = CGRectMake(bodyFrame.origin.x + strokeOffset,
+                            bodyFrame.origin.y + strokeOffset,
+                            fillW,
+                            availH);
+
+    // 6. Bug 2 fix: Center charging lightning bolt precisely at the dead center of the battery
+    CALayer *bolt = nil;
+    @try { bolt = [self valueForKey:@"boltLayer"]; } @catch (NSException *ex) {}
+    if (!bolt) {
+        Ivar iv = class_getInstanceVariable(self.class, "_boltLayer");
+        if (iv) bolt = object_getIvar(self, iv);
+    }
+    CALayer *boltMask = nil;
+    @try { boltMask = [self valueForKey:@"boltMaskLayer"]; } @catch (NSException *ex) {}
+    if (!boltMask) {
+        Ivar iv = class_getInstanceVariable(self.class, "_boltMaskLayer");
+        if (iv) boltMask = object_getIvar(self, iv);
+    }
+
+    if (bolt && !bolt.hidden) {
+        CGPoint centerPoint;
+        if (bolt.superlayer == body) {
+            centerPoint = CGPointMake(CGRectGetMidX(body.bounds), CGRectGetMidY(body.bounds));
+        } else {
+            centerPoint = CGPointMake(CGRectGetMidX(bodyFrame), CGRectGetMidY(bodyFrame));
+        }
+        bolt.position = centerPoint;
+        if (boltMask) {
+            boltMask.position = (boltMask.superlayer == body) ?
+                CGPointMake(CGRectGetMidX(body.bounds), CGRectGetMidY(body.bounds)) : centerPoint;
+        }
+    }
+
+    [CATransaction commit];
 }
 
 static BOOL s_inBatteryLayout = NO;
@@ -1160,37 +1255,9 @@ static void ld_batteryView_layoutSubviews(UIView *self, SEL _cmd) {
     if (g_origBatteryLayoutSubviews) {
         ((void (*)(id, SEL))g_origBatteryLayoutSubviews)(self, _cmd);
     }
-    if (g_roundBatteryEnabled) {
-        @try {
-            BOOL isCC = ld_isInsideControlCenter(self);
-            double baseOut = (g_batteryOutsideRadius > 0.0) ? g_batteryOutsideRadius : 3.8;
-            double outR = isCC ? (baseOut * 1.15) : baseOut;
-            double inR = fmax(1.0, outR - 1.0);
-
-            CALayer *body = nil;
-            @try { body = [self valueForKey:@"bodyLayer"]; } @catch (NSException *ex) {}
-            if (body) {
-                body.cornerCurve = kCACornerCurveContinuous;
-            }
-
-            CALayer *fill = nil;
-            @try { fill = [self valueForKey:@"fillLayer"]; } @catch (NSException *ex) {}
-            if (fill) {
-                fill.cornerCurve = kCACornerCurveContinuous;
-                fill.cornerRadius = inR;
-            }
-
-            if (g_ios27BatteryStyleEnabled) {
-                UILabel *lbl = nil;
-                @try { lbl = [self valueForKey:@"percentageLabel"]; } @catch (NSException *ex) {}
-                if (lbl) {
-                    lbl.hidden = YES;
-                    lbl.alpha = 0.0;
-                    lbl.text = @"";
-                }
-            }
-        } @catch (NSException *e) {}
-    }
+    @try {
+        ld_applyBatteryStyle(self);
+    } @catch (NSException *e) {}
     s_inBatteryLayout = NO;
 }
 
@@ -1216,21 +1283,6 @@ static void ld_installBatteryHooksForClass(Class cls) {
         IMP orig = ld_swizzle(meta, @selector(_lineWidthAndInterspaceForIconSize:),
                               (IMP)ld_batteryLineWidthAndInterspaceClass);
         if (!g_origBatteryLineWidthAndInterspaceClass) g_origBatteryLineWidthAndInterspaceClass = orig;
-    }
-    if (class_getInstanceMethod(cls, @selector(showsPercentage))) {
-        IMP orig = ld_swizzle(cls, @selector(showsPercentage),
-                              (IMP)ld_batteryShowsPercentage);
-        if (!g_origBatteryShowsPercentage) g_origBatteryShowsPercentage = orig;
-    }
-    if (class_getInstanceMethod(cls, @selector(_currentlyShowsPercentage))) {
-        IMP orig = ld_swizzle(cls, @selector(_currentlyShowsPercentage),
-                              (IMP)ld_batteryCurrentlyShowsPercentage);
-        if (!g_origBatteryCurrentlyShowsPercentage) g_origBatteryCurrentlyShowsPercentage = orig;
-    }
-    if (class_getInstanceMethod(cls, @selector(_updatePercentage))) {
-        IMP orig = ld_swizzle(cls, @selector(_updatePercentage),
-                              (IMP)ld_batteryView_updatePercentage);
-        if (!g_origBatteryUpdatePercentage) g_origBatteryUpdatePercentage = orig;
     }
     IMP origLayout = ld_swizzle(cls, @selector(layoutSubviews),
                                 (IMP)ld_batteryView_layoutSubviews);
@@ -1285,7 +1337,7 @@ static void ld_init(void) {
 
         ld_installLiquidGlassHooks();
 
-        ld_log(@"loaded v0.2.15 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
+        ld_log(@"loaded v0.2.17 enabled=%d sticky=%d maxAlpha=%.2f CS=%@ SB=%@ PromDisplay=%@ SBFDate=%@",
                g_enabled, g_stickyClock, g_maxAlpha,
                cs ? NSStringFromClass(cs) : @"missing",
                sb ? NSStringFromClass(sb) : @"missing",
